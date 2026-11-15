@@ -14,9 +14,9 @@ Collection of tools used with the MB230 USB injection / jailbreak workflow.
   remote/input test app for MB230 (prebuilt binary, Docker build).
   Submodule: [nirodg/mb230-gui-hello-world](https://github.com/nirodg/mb230-gui-hello-world).
 
-## Quick install: Dropbear SSH (on TV)
+## Quick install: Dropbear SSH (on TV, seamless)
 
-From a root shell on the TV (e.g. telnet):
+From a root shell on the TV (e.g. telnet), pass your PC SSH public key (RSA or ed25519) to auto-create `authorized_keys`:
 
 ```sh
 mkdir -p /tmp/dropbear-pkg && cd /tmp/dropbear-pkg
@@ -26,10 +26,11 @@ wget -O install.sh  "$BASE/install.sh"
 wget -O dropbear    "$BASE/out/dropbear"
 wget -O dropbearkey "$BASE/out/dropbearkey"
 chmod +x install.sh dropbear dropbearkey
-sh install.sh
+# paste your key from PC: cat ~/.ssh/id_rsa.pub (or id_ed25519.pub)
+PUBKEY='ssh-rsa AAAA... user@pc' sh install.sh
+# or interactive: sh install.sh  (prompts for key)
 ```
-
-See [`dropbear/README.md`](dropbear/README.md) for full options.
+Then: `ssh root@<tv-ip>`. See [`dropbear/README.md`](dropbear/README.md) for full options and persistence.
 
 ## Quick install: hello-world (on TV)
 
