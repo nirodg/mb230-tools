@@ -235,7 +235,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
 
-    logmsg("starting OpenTV MB230 port v0.1");
+    logmsg("starting OpenTV MB230 port v0.1.1");
     if (wd.enabled) wdkick_open(&wd);
 
     FB fb; memset(&fb, 0, sizeof(fb));
