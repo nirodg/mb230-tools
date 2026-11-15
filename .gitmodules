@@ -1,3 +1,9 @@
 [submodule "dropbear"]
 	path = dropbear
 	url = git@github.com:nirodg/mb230-dropbear.git
+[submodule "hello-world"]
+	path = hello-world
+	url = git@github.com:nirodg/mb230-hello-world.git
+[submodule "gui-hello-world"]
+	path = gui-hello-world
+	url = git@github.com:nirodg/mb230-gui-hello-world.git

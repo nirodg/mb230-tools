@@ -7,8 +7,14 @@ Collection of tools used with the MB230 USB injection / jailbreak workflow.
 - [`dropbear/`](dropbear/) — Dropbear SSH server/client port for Vestel MB230
   (static ARMv7 binaries, on-TV installer, host keys in `/conf/dropbear`).
   Submodule: [nirodg/mb230-dropbear](https://github.com/nirodg/mb230-dropbear).
+- [`hello-world/`](hello-world/) — minimal ARMv7 "Hello World" proof app for
+  telnet/root shell testing (prebuilt binary, Docker build).
+  Submodule: [nirodg/mb230-hello-world](https://github.com/nirodg/mb230-hello-world).
+- [`gui-hello-world/`](gui-hello-world/) — framebuffer GUI "Hello World" +
+  remote/input test app for MB230 (prebuilt binary, Docker build).
+  Submodule: [nirodg/mb230-gui-hello-world](https://github.com/nirodg/mb230-gui-hello-world).
 
-## Quick install (Dropbear SSH on TV)
+## Quick install: Dropbear SSH (on TV)
 
 From a root shell on the TV (e.g. telnet):
 
@@ -23,8 +29,31 @@ chmod +x install.sh dropbear dropbearkey
 sh install.sh
 ```
 
-See [`dropbear/README.md`](dropbear/README.md) for full options (public key
-install, persistence, manual/`nc` copy, build).
+See [`dropbear/README.md`](dropbear/README.md) for full options.
+
+## Quick install: hello-world (on TV)
+
+```sh
+TAG="v1.0.0"
+BASE="https://raw.githubusercontent.com/nirodg/mb230-hello-world/$TAG"
+cd /tmp && wget -O hello "$BASE/hello" && chmod +x hello && ./hello
+```
+
+See [`hello-world/README.md`](hello-world/README.md).
+
+## Quick install: gui-hello-world (on TV)
+
+```sh
+TAG="v1.0.0"
+BASE="https://raw.githubusercontent.com/nirodg/mb230-gui-hello-world/$TAG"
+cd /tmp
+wget -O gui_hello "$BASE/gui_hello"
+wget -O run-on-tv.sh "$BASE/run-on-tv.sh"
+chmod +x gui_hello run-on-tv.sh
+# takeover test (stops stock UI): ./run-on-tv.sh
+```
+
+See [`gui-hello-world/README.md`](gui-hello-world/README.md).
 
 ## Repository layout
 
