@@ -90,37 +90,43 @@ EOF
   cat > "$INSTALL_DIR/run-on-tv.sh" <<'RUN'
 #!/bin/sh
 # Manual runner for OpenTV MB230 port.
-#   sidecar:  ./run-on-tv.sh sidecar [-- args]
+#   sidecar:  ./run-on-tv.sh [sidecar] [-- otv_port args...]
 #   takeover: ./run-on-tv.sh takeover (EXPERIMENTAL: may reboot if WDT not satisfied)
 set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 BIN="$DIR/otv_port"
-MODE="${1:-sidecar}"
-[ "$#" -gt 0 ] && shift || true
+MODE="sidecar"
+if [ "${1:-}" = "sidecar" ] || [ "${1:-}" = "takeover" ]; then
+  MODE="$1"; shift
+elif [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  echo "usage: $0 [sidecar|takeover] [-- otv_port args...]"; exit 0
+elif [ "${1:-}" != "" ] && [ "${1#-}" = "${1}" ]; then
+  echo "usage: $0 [sidecar|takeover] [-- otv_port args...]" >&2; exit 2
+fi
 KICK_WDT="${KICK_WDT:-1}"
 TAKEOVER_DELAY="${TAKEOVER_DELAY:-5}"
 
 case "$MODE" in
   sidecar)
-    echo "[otv-port] starting sidecar (no aurora kill). args: $*"
+    echo "[otv-port] sidecar: starting $BIN $*" >&2
     exec "$BIN" "$@"
     ;;
   takeover)
-    echo "[otv-port] EXPERIMENTAL TAKEOVER in ${TAKEOVER_DELAY}s (Ctrl-C to abort)"
-    echo "[otv-port] will stop aurora/idtv/appmgr and run UI; reboot possible if watchdog not kicked"
-    sleep "$TAKEOVER_DELAY"
+    KILL_APPMGR="${KILL_APPMGR:-0}"
     ARGS=""
-    if [ "$KICK_WDT" = "1" ]; then ARGS="--kick-wdt"; fi
-    # best-effort: stop stock UI owners
+    [ "$KICK_WDT" = "1" ] && ARGS="--kick-wdt"
+    echo "[otv-port] EXPERIMENTAL TAKEOVER in ${TAKEOVER_DELAY}s (Ctrl-C to abort)" >&2
+    echo "[otv-port] will stop aurora/idtv (KILL_APPMGR=$KILL_APPMGR) then exec: $BIN $ARGS $*" >&2
+    echo "[otv-port] WARNING: may reboot/power-off quickly if platform liveness/watchdog not satisfied" >&2
+    sleep "$TAKEOVER_DELAY"
+    [ -f "$DIR/otv_port.pid" ] && kill "$(cat "$DIR/otv_port.pid" 2>/dev/null)" 2>/dev/null || true
     killall aurora.elf 2>/dev/null || true
     killall idtv 2>/dev/null || true
     killall com.nvt.idtv 2>/dev/null || true
-    killall appmgr 2>/dev/null || true
+    if [ "$KILL_APPMGR" = "1" ]; then killall appmgr 2>/dev/null || true; fi
     sleep 2
+    echo "[otv-port] launching takeover UI now..." >&2
     exec "$BIN" $ARGS "$@"
-    ;;
-  *)
-    echo "usage: $0 sidecar|takeover [-- args]" >&2; exit 2
     ;;
 esac
 RUN

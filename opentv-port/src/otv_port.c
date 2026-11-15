@@ -72,10 +72,14 @@ static long now_ms(void) {
 }
 
 static void logmsg(const char *msg) {
-    FILE *f = fopen("/tmp/otv_port.log", "a");
-    if (f) {
-        fprintf(f, "[%ld] %s\n", (long)time(NULL), msg);
-        fclose(f);
+    long ts = (long)time(NULL);
+    const char *paths[] = {"/tmp/otv_port.log", "/conf/opentv-port/otv_port.runtime.log", NULL};
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "a");
+        if (f) {
+            fprintf(f, "[%ld] %s\n", ts, msg);
+            fclose(f);
+        }
     }
     fprintf(stderr, "[otv-port] %s\n", msg);
 }

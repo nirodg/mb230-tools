@@ -45,11 +45,12 @@ case "$MODE" in
   takeover)
     KICK_WDT="${KICK_WDT:-1}"
     TAKEOVER_DELAY="${TAKEOVER_DELAY:-5}"
+    KILL_APPMGR="${KILL_APPMGR:-0}"
     ARGS=""
     [ "$KICK_WDT" = "1" ] && ARGS="--kick-wdt"
     echo "[opentv-port] EXPERIMENTAL TAKEOVER in ${TAKEOVER_DELAY}s (Ctrl-C to abort)" >&2
-    echo "[opentv-port] will stop aurora/idtv/appmgr, then exec: $BIN $ARGS $*" >&2
-    echo "[opentv-port] WARNING: may reboot in ~20-30s if MCU/STBC watchdog not satisfied" >&2
+    echo "[opentv-port] will stop aurora/idtv (KILL_APPMGR=$KILL_APPMGR), then exec: $BIN $ARGS $*" >&2
+    echo "[opentv-port] WARNING: may reboot/power-off quickly if platform liveness/watchdog not satisfied" >&2
     sleep "$TAKEOVER_DELAY"
     # stop keeper-managed otv_port if running to avoid duplicates
     if [ -f "$DIR/otv_port.pid" ]; then
@@ -58,7 +59,7 @@ case "$MODE" in
     killall aurora.elf 2>/dev/null || true
     killall idtv 2>/dev/null || true
     killall com.nvt.idtv 2>/dev/null || true
-    killall appmgr 2>/dev/null || true
+    if [ "$KILL_APPMGR" = "1" ]; then killall appmgr 2>/dev/null || true; fi
     sleep 2
     echo "[opentv-port] launching takeover UI now..." >&2
     exec "$BIN" $ARGS "$@"
