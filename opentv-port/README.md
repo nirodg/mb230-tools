@@ -7,7 +7,7 @@ Early, **tryable** port scaffold to run OpenTV-style userspace on a Vestel **17M
 
 Reference prototype: `/home/dorin/Downloads/open-tv-launcher` (`os/` gateway + UI/launcher). QEMU is for testing there; MB230 needs vendor-native backends and liveness-aware integration.
 
-> **Status: v0.1.2.** Safe default is **sidecar mode** (no kill of `aurora.elf`). **Rendering on top is now proven via DirectFB**: `otv_port` joins the running fusion/sawman session and draws to the primary display layer surface alongside aurora (no reboot). UI takeover without reboot/replacing aurora liveness remains open (see `docs/REBOOT_AND_LIVENESS.md`).
+> **Status: v0.1.2 (breakthrough, experimental).** Safe default is **sidecar mode** (no kill of `aurora.elf`). **Rendering on top is proven via DirectFB**: `otv_port` joins the running fusion/sawman session and draws to the primary display layer surface — user-confirmed visible UI alongside aurora. **Caveat:** an observed integrated-UI run was followed by a TV reset after ~seconds (cause TBD, see `docs/REBOOT_AND_LIVENESS.md`); treat as not yet stability-proven. Full takeover without reboot/replacing aurora liveness remains open.
 
 ## Contents
 
