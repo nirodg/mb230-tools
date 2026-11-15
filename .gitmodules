@@ -1,0 +1,3 @@
+[submodule "dropbear"]
+	path = dropbear
+	url = git@github.com:nirodg/mb230-dropbear.git
