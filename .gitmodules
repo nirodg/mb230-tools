@@ -7,3 +7,6 @@
 [submodule "gui-hello-world"]
 	path = gui-hello-world
 	url = git@github.com:nirodg/mb230-gui-hello-world.git
+[submodule "apt"]
+	path = apt
+	url = https://salsa.debian.org/apt-team/apt.git

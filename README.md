@@ -4,6 +4,9 @@ Collection of tools used with the MB230 USB injection / jailbreak workflow.
 
 ## Contents
 
+- [`apt/`](apt/) — APT (Advanced Package Tool) source, tracked as a submodule
+  for building/porting a full command-line package manager for the target TV
+  (`armv7l`, Linux 4.9.x). Upstream: [apt-team/apt on Debian Salsa](https://salsa.debian.org/apt-team/apt).
 - [`dropbear/`](dropbear/) — Dropbear SSH server/client port for Vestel MB230
   (static ARMv7 binaries, on-TV installer, host keys in `/conf/dropbear`).
   Submodule: [nirodg/mb230-dropbear](https://github.com/nirodg/mb230-dropbear).
