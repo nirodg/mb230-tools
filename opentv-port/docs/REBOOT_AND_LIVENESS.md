@@ -86,3 +86,10 @@ Aurora integrates with an MCU/STBC watchdog via Novatek DAL/platform calls:
 - Input/dispatch (aurora-owned): `DEV_Uart_GetKey`, `FUN_00761880`/`mapVestelKey`, `ice_KeyEventDispatchThread`, `FUN_00761cf8`.
 - Prior payload experiment: `stage1/launcher/opentv_payload.c` (pets `/dev/watchdog*`).
 - Project docs: `aurora-re/AURORA_MODDING_REFERENCE.md`, `aurora-re/GHIDRA_DECODE.md`, `ARCHITECTURE.md`.
+
+## Update (v0.1.2, validated on-device): DirectFB sidecar overlay renders on screen
+
+- **Result (proven):** a sidecar process can join the running DirectFB 1.7 fusion+sawman session (`system=fbdev,wm=sawman`, mp core) alongside aurora, obtain `IDirectFB` + primary display layer (0) surface (1920x1080), and draw/flip via `libdirectfb-1.7.so.1` — **visible on TV** (semi-transparent draw confirmed) with **no aurora kill and no reboot**. Integrated as `otv_port --dfb` (default).
+- **Contrast:** raw fbdev writes to `/dev/fb0-4` (all unblanked) were not scanout-visible under compositor/plane control; the compositor-owned DirectFB surface path is the working "render on top" mechanism for sidecar mode.
+- **Implication:** display priority/overlay for OpenTV sidecar is achievable without replacing aurora liveness. Remaining work: refine compositing (layer/window stacking, alpha/position), input routing/ownership, and a full launcher UI backend; true takeover still requires a context-correct liveness strategy.
+- **Evidence/probes:** `src/probe_dfb*.c`, `src/probe_dfb_draw.c` (dlopen+vtable calls against vendor `libdirectfb-1.7.so.1`); key vtable slots (MB230 lib build): layer `GetSurface[9]`, `SetCooperativeLevel[11]`; layer-surface `GetSize[7]`, `Layer_Flip[20]`, `Clear[23]`, `SetColor[26]`, `FillRectangle[42]` (matched to symbol starts).

@@ -1,4 +1,4 @@
-# OpenTV MB230 port (first tryable sidecar)
+# OpenTV MB230 port (tryable sidecar)
 
 Early, **tryable** port scaffold to run OpenTV-style userspace on a Vestel **17MB230** (Novatek NT72671/NT72673, ARMv7 Cortex-A7, Linux 4.9 "Kylo") in a **CyanogenMod-like** model:
 
@@ -7,13 +7,14 @@ Early, **tryable** port scaffold to run OpenTV-style userspace on a Vestel **17M
 
 Reference prototype: `/home/dorin/Downloads/open-tv-launcher` (`os/` gateway + UI/launcher). QEMU is for testing there; MB230 needs vendor-native backends and liveness-aware integration.
 
-> **Status: v0.1 (first version to try).** Safe default is **sidecar mode** (no kill of `aurora.elf`). UI takeover / "render on top" without reboot is the main open problem (see `docs/REBOOT_AND_LIVENESS.md`).
+> **Status: v0.1.2.** Safe default is **sidecar mode** (no kill of `aurora.elf`). **Rendering on top is now proven via DirectFB**: `otv_port` joins the running fusion/sawman session and draws to the primary display layer surface alongside aurora (no reboot). UI takeover without reboot/replacing aurora liveness remains open (see `docs/REBOOT_AND_LIVENESS.md`).
 
 ## Contents
 
-- `src/otv_port.c` — minimal OpenTV port shell (fbdev UI, UART IR/GPIO input probe, optional `/dev/watchdog` kicker, logging).
-- `otv_port` — **prebuilt** static ARMv7 EABI5 hard-float binary (first tryable artifact).
-- `build-docker.sh` / `Makefile` — reproducible Docker/native cross-build.
+- `src/otv_port.c` — minimal OpenTV port shell with **DirectFB overlay backend** (`--dfb`, default) joining fusion/sawman to render on primary layer surface, plus fbdev fallback (`--fbdev`), UART IR/GPIO input probe, optional `/dev/watchdog` kicker, logging.
+- `otv_port` — **prebuilt** dynamic ARMv7 EABI5 hard-float binary (dlopen of vendor DirectFB/NDAL libs).
+- `src/ndal_wdt_keep.c` / `ndal_wdt_keep` — experimental, safe-by-default NDAL STBC WDT helper (dlsym-only; `--kick` risky without proper context).
+- `build-docker.sh` / `Makefile` — reproducible Docker/native cross-build (dynamic, `-ldl`).
 - `installer.sh` — on-TV installer to `/conf/opentv-port` (persistent), starts keeper, can arm auto-load hook.
 - `run-on-tv.sh` — manual runner (sidecar/takeover).
 - `docs/REBOOT_AND_LIVENESS.md` — reboot-on-kill evidence and bypass strategies.
@@ -43,12 +44,13 @@ Logs: `/tmp/otv_port.log`, `/conf/opentv-port/keeper.log`, `/conf/opentv-port/ot
 
 ```sh
 /conf/opentv-port/run-on-tv.sh sidecar
-# or: /conf/opentv-port/otv_port
+# or: /conf/opentv-port/otv_port            # DirectFB overlay (default, renders on screen alongside aurora)
+/conf/opentv-port/otv_port --fbdev        # raw fbdev fallback
 ```
 
 - Does **not** kill `aurora.elf`/idtv/appmgr (preserves platform liveness/watchdog kicks).
-- Attempts to draw to `/dev/fb0` and probe `/dev/ttyS2` + `/dev/ntgpio`.
-- **Limitation:** while aurora owns display/IR, on-screen visibility and input events may be unavailable/conflicted. Useful to confirm the binary runs, logs, and device access on stock firmware.
+- **Display (proven):** joins existing DirectFB fusion/sawman session and renders to the primary display layer surface (`--dfb`, default) — visible on screen without reboot. Falls back to fbdev if DirectFB init fails.
+- **Input:** probes `/dev/ttyS2` (UART IR) and `/dev/ntgpio` (non-blocking). Input events may be unavailable/conflicted while aurora owns IR.
 
 ### Takeover (experimental, may reboot)
 
@@ -71,16 +73,16 @@ Logs: `/tmp/otv_port.log`, `/conf/opentv-port/keeper.log`, `/conf/opentv-port/ot
 See **`docs/REBOOT_AND_LIVENESS.md`** for evidence-backed analysis. Summary:
 
 - **Primary liveness:** aurora kicks MCU/STBC watchdog via `PLAT_SYS_KickWatchDog` → `NDAL_VideoExt_STBC_FreshWDT` and participates in appmgr/privserver/semaphore/STR flow. Killing aurora removes kicks → likely MCU WDT reset.
-- **V0.1 mitigation attempts:** `--kick-wdt` pets `/dev/watchdog*` if available (best-effort; may not be the same WDT). True bypass likely requires either keeping aurora alive, a shim that performs platform WDT kicks (NDAL/STBC access) and satisfies appmgr contracts, or deeper integration.
-- **Render-on-top priority:** blocked by display/input ownership (DirectFB/sawman planes, UART IR `/dev/ttyS2` owned by aurora) and liveness coupling. Next steps: MB230 gateway backends (`display-directfb`/fbdev, `input-uart-ir` bridge) + cooperative or replacing-liveness strategy.
+- **V0.1 mitigation attempts:** `--kick-wdt` pets `/dev/watchdog*` if available (best-effort; may not be the same WDT). NDAL STBC kick via `libNDAL_EX.so` requires valid context/init (unsafe uninitialized calls correlated with reboot). True bypass likely requires keeping aurora alive, or a context-correct WDT shim plus appmgr contract handling.
+- **Render-on-top / priority (proven, sidecar):** `otv_port --dfb` joins the running DirectFB 1.7 fusion+sawman session and draws to the primary display layer surface — **visible on screen alongside aurora** (no kill, no reboot). Raw fbdev (`/dev/fb0-4`) writes were not scanout-visible under compositor control. Next: refine overlay compositing/positioning/layers/input integration and integrate into a full OpenTV UI launcher while keeping liveness intact.
 
-## Build (reproduce binary)
+## Build (reproduce binaries)
 
 ```sh
 cd usb-injection/tools/opentv-port
 ./build-docker.sh
 # or: make docker
-# produces: ./otv_port (ELF 32-bit ARM, EABI5, static)
+# produces: ./otv_port, ./ndal_wdt_keep (ELF 32-bit ARM, EABI5, dynamically linked, -ldl)
 ```
 
 ## Mapping to OpenTV `os/` (next porting steps)
