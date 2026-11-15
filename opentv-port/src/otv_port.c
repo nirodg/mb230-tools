@@ -106,7 +106,10 @@ static const char *dfb_err(DFB *d, DFBResult r) { return (d && d->err) ? d->err(
 
 static int dfb_init(DFB *d) {
     memset(d, 0, sizeof(*d));
-    setenv("DFBARGS", "system=fbdev,wm=sawman,no-cursor,module-dir=/vendor/lib/dfb/directfb-1.7-1", 0);
+    /* Join running mp session; no-sighandler avoids DirectFB's fatal signal
+     * trapping on Ctrl-C/SIGTERM which can destabilize shared fusion session
+     * and has been observed to correlate with TV reboot on exit. */
+    setenv("DFBARGS", "system=fbdev,wm=sawman,no-cursor,no-sighandler,module-dir=/vendor/lib/dfb/directfb-1.7-1", 0);
     const char *paths[] = {"/vendor/lib/dfb/libdirectfb-1.7.so.1", "/mtd_apexe/board/lib/dfb/libdirectfb-1.7.so.1", "libdirectfb-1.7.so.1", NULL};
     for (int i = 0; paths[i]; i++) {
         d->lib = dlopen(paths[i], RTLD_NOW|RTLD_GLOBAL);
@@ -146,8 +149,14 @@ static int dfb_init(DFB *d) {
 }
 
 static void dfb_shutdown(DFB *d) {
-    if (d->surf && d->clear && d->flip) { d->clear(d->surf,0,0,0,0); d->flip(d->surf,NULL,0); }
-    /* best-effort; process exit will tear down session membership */
+    /* Best-effort gentle cleanup: clear our drawing and flip once, then stop.
+     * Avoid aggressive interface release in shared fusion session from here;
+     * process exit detaches. Clearing helps reduce stale overlay if we exit
+     * cleanly (SIGTERM/SIGINT). Abrupt kills may still disrupt shared session. */
+    if (d->ok && d->surf && d->clear && d->flip) {
+        d->clear(d->surf, 0, 0, 0, 0);
+        d->flip(d->surf, NULL, 0);
+    }
     d->ok = 0;
 }
 
@@ -272,8 +281,10 @@ int main(int argc, char **argv) {
     }
     if (!fbdev) fbdev = "/dev/fb0";
 
+    /* install our handlers early; dfb init uses no-sighandler to avoid
+     * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
-    logmsg("starting OpenTV MB230 port v0.1.2 (sidecar)");
+    logmsg("starting OpenTV MB230 port v0.1.3 (sidecar)");
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -321,7 +332,7 @@ int main(int argc, char **argv) {
             R(ctx, 40, 40, W-80, H-80, 70, 120, 200);
             R(ctx, 44, 44, W-88, H-88, 10, 14, 24);
             draw_text_common(80, 80, 7, "OPENTV PORT", 245,247,251, R, ctx);
-            draw_text_common(80, 150, 3, "MB230 VESTEL SIDECAR - V0.1.2", 140,190,255, R, ctx);
+            draw_text_common(80, 150, 3, "MB230 VESTEL SIDECAR - V0.1.3", 140,190,255, R, ctx);
             draw_text_common(80, 210, 3, "CYANOGENMOD-STYLE: VENDOR BASE + OPENTV USERSPACE", 180,220,180, R, ctx);
             char line[96];
             snprintf(line,sizeof(line),"UPTIME: %ld S   FRAMES: %lu   RENDER: %s", (t-start)/1000, ++frames, use_dfb?"DFB":"FBDEV");
