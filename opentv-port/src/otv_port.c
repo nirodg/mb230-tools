@@ -243,7 +243,8 @@ static void draw_text_common(int x, int y, int scale, const char *s, uint8_t r, 
 }
 
 static void fb_rect_cb(void *ctx, int x,int y,int w,int h,uint8_t r,uint8_t g,uint8_t b){ fb_fill_rect((FB*)ctx,x,y,w,h,r,g,b); }
-static void dfb_rect_cb(void *ctx, int x,int y,int w,int h,uint8_t r,uint8_t g,uint8_t b){ dfb_fill((DFB*)ctx,x,y,w,h,r,g,b,255); }
+static void dfb_rect_cb2(void *ctx, int x,int y,int w,int h,uint8_t r,uint8_t g,uint8_t b){ dfb_fill((DFB*)ctx,x,y,w,h,r,g,b,255); }
+static void dfb_rect_a(DFB *d, int x,int y,int w,int h,uint8_t r,uint8_t g,uint8_t b,uint8_t a){ dfb_fill(d,x,y,w,h,r,g,b,a); }
 
 static int set_raw(int fd) {
     struct termios tio; if (tcgetattr(fd,&tio)!=0) return -1;
@@ -284,7 +285,7 @@ int main(int argc, char **argv) {
     /* install our handlers early; dfb init uses no-sighandler to avoid
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
-    logmsg("starting OpenTV MB230 port v0.1.3 (sidecar)");
+    logmsg("starting OpenTV MB230 port v0.1.4 (sidecar)");
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -325,32 +326,49 @@ int main(int argc, char **argv) {
         if (ui && (use_dfb ? dfb.ok : (fb.fb!=NULL))) {
             int W = use_dfb ? dfb.w : fb.w;
             int H = use_dfb ? dfb.h : fb.h;
-            void (*R)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb : fb_rect_cb;
+            void (*R)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? NULL : fb_rect_cb;
             void *ctx = use_dfb ? (void*)&dfb : (void*)&fb;
-            /* background: semi-transparent dark panel so aurora can show through edges when overlay */
-            R(ctx, 0, 0, W, H, 10, 14, 24);
-            R(ctx, 40, 40, W-80, H-80, 70, 120, 200);
-            R(ctx, 44, 44, W-88, H-88, 10, 14, 24);
-            draw_text_common(80, 80, 7, "OPENTV PORT", 245,247,251, R, ctx);
-            draw_text_common(80, 150, 3, "MB230 VESTEL SIDECAR - V0.1.3", 140,190,255, R, ctx);
-            draw_text_common(80, 210, 3, "CYANOGENMOD-STYLE: VENDOR BASE + OPENTV USERSPACE", 180,220,180, R, ctx);
+            /* Semi-transparent panel overlay to reduce full-surface conflict with
+             * aurora repaints (aurora may redraw on input; we repaint this panel
+             * each frame). Full opaque repaint of entire layer is avoided. */
+            int px = 40, py = 40, pw = W - 80, ph = 640;
+            if (ph > H - 80) ph = H - 80;
+            if (use_dfb) {
+                dfb_rect_a(&dfb, 0, 0, W, H, 0, 0, 0, 0); /* clear full frame transparent */
+                dfb_rect_a(&dfb, px, py, pw, ph, 10, 14, 24, 210);
+                dfb_rect_a(&dfb, px, py, pw, 4, 70, 120, 200, 230);
+                dfb_rect_a(&dfb, px, py+ph-4, pw, 4, 70, 120, 200, 230);
+                dfb_rect_a(&dfb, px, py, 4, ph, 70, 120, 200, 230);
+                dfb_rect_a(&dfb, px+pw-4, py, 4, ph, 70, 120, 200, 230);
+            } else {
+                R(ctx, 0, 0, W, H, 10, 14, 24);
+                R(ctx, px, py, pw, ph, 10, 14, 24);
+                R(ctx, px, py, pw, 4, 70, 120, 200);
+                R(ctx, px, py+ph-4, pw, 4, 70, 120, 200);
+                R(ctx, px, py, 4, ph, 70, 120, 200);
+                R(ctx, px+pw-4, py, 4, ph, 70, 120, 200);
+            }
+            void (*Rtext)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb2 : fb_rect_cb;
+            draw_text_common(80, 80, 7, "OPENTV PORT", 245,247,251, Rtext, ctx);
+            draw_text_common(80, 150, 3, "MB230 VESTEL SIDECAR - V0.1.4", 140,190,255, Rtext, ctx);
+            draw_text_common(80, 210, 3, "CYANOGENMOD-STYLE: VENDOR BASE + OPENTV USERSPACE", 180,220,180, Rtext, ctx);
             char line[96];
             snprintf(line,sizeof(line),"UPTIME: %ld S   FRAMES: %lu   RENDER: %s", (t-start)/1000, ++frames, use_dfb?"DFB":"FBDEV");
-            draw_text_common(80, 300, 3, line, 230,230,150, R, ctx);
+            draw_text_common(80, 300, 3, line, 230,230,150, Rtext, ctx);
             snprintf(line,sizeof(line),"INPUT EVENTS: %lu   LAST: %s", events, last_src);
-            draw_text_common(80, 340, 3, line, 230,230,150, R, ctx);
+            draw_text_common(80, 340, 3, line, 230,230,150, Rtext, ctx);
             if (wd.enabled) snprintf(line,sizeof(line),"WDT KICK: %s  KICKS=%lu ERR=%lu", wd.fd>=0?wd.path:"NONE", wd.kicks, wd.errors);
             else snprintf(line,sizeof(line),"WDT KICK: OFF (PLATFORM/AURORA LIVENESS)");
-            draw_text_common(80, 380, 3, line, 255,200,120, R, ctx);
+            draw_text_common(80, 380, 3, line, 255,200,120, Rtext, ctx);
             if (last_n>0) {
                 char hex[96]="LAST BYTES: "; int off=12;
                 for (int i=0;i<last_n && i<8 && off<(int)sizeof(hex)-4;i++) off+=snprintf(hex+off,sizeof(hex)-off,"%02X ",last_bytes[i]);
-                draw_text_common(80, 440, 3, hex, 180,220,220, R, ctx);
+                draw_text_common(80, 440, 3, hex, 180,220,220, Rtext, ctx);
             }
-            if (t-last_any < 1200) draw_text_common(80, 520, 4, "INPUT RECEIVED", 80,255,140, R, ctx);
-            else draw_text_common(80, 520, 4, "WAITING / SIDECAR READY", 170,170,190, R, ctx);
-            draw_text_common(80, H-120, 2, "SIDECAR MODE: AURORA ALIVE. DFB PATH CAN RENDER ON SCREEN.", 220,180,150, R, ctx);
-            draw_text_common(80, H-90,  2, "SEE DOCS/REBOOT_AND_LIVENESS.MD", 160,160,160, R, ctx);
+            if (t-last_any < 1200) draw_text_common(80, 520, 4, "INPUT RECEIVED", 80,255,140, Rtext, ctx);
+            else draw_text_common(80, 520, 4, "WAITING / SIDECAR READY", 170,170,190, Rtext, ctx);
+            draw_text_common(80, py+ph-50, 2, "SIDECAR: AURORA ALIVE. SEMI-TRANSPARENT OVERLAY PANEL.", 220,180,150, Rtext, ctx);
+            draw_text_common(80, py+ph-25, 2, "SEE DOCS/REBOOT_AND_LIVENESS.MD", 160,160,160, Rtext, ctx);
             if (use_dfb && dfb.flip) dfb.flip(dfb.surf, NULL, 0);
         }
 
