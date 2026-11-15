@@ -9,4 +9,4 @@
 	url = git@github.com:nirodg/mb230-gui-hello-world.git
 [submodule "apt"]
 	path = apt
-	url = https://salsa.debian.org/apt-team/apt.git
+	url = git@github.com:nirodg/mb230-apt.git
