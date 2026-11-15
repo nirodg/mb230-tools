@@ -1,0 +1,48 @@
+# OpenTV device.conf template for Vestel 17MB230 (NT72671/73, ARMv7, Linux 4.9 "Kylo")
+# CyanogenMod-style: vendor kernel + drivers + low-level libs kept; OpenTV as sidecar.
+# This is a planning template for porting os/src/gateway backends (not used by v0.1 otv_port).
+
+[device]
+name = vestel-mb230
+board = nt72671
+arch = armv7hf
+
+[display]
+# Stock userspace is DirectFB 1.7 / fusion / sawman + Mali (+ Novatek sinks).
+# Preferred port: directfb backend. fbdev (/dev/fb0) may work only without compositor ownership.
+backend = directfb
+fallback = fbdev
+width = 1920
+height = 1080
+format = bgra8888
+
+[input]
+# No evdev remote by default. IR is UART-driven and decoded in-process by aurora.elf:
+#   DEV_Uart_GetKey (UART /dev/ttyS2, also /dev/ntgpio) -> FUN_00761880/mapVestelKey
+#   -> ice_KeyEventDispatchThread / FUN_00761cf8 -> ICE_CallKeyPressFunction/APM.
+# Port needs a uart-ir backend (raw read/decode or bridge) with ownership/liveness awareness.
+backend = uart-ir
+uart = /dev/ttyS2
+gpio = /dev/ntgpio
+
+[audio]
+# Stock: ALSA/tinycompress + NVT/GStreamer media stack. Start with null/alsa as available.
+backend = alsa
+fallback = null
+
+[storage]
+# Writable/persistent: /conf (UBIFS). Cache: /buffer. Temp: /tmp (cleared on reboot).
+config_dir = /conf/opentv-port
+cache_dir = /buffer/opentv-cache
+tmp_dir = /tmp
+usb_media = /mnt/usb
+
+[network]
+backend = real
+
+[liveness]
+# Critical on MB230: aurora.elf kicks MCU/STBC watchdog (NDAL_VideoExt_STBC_FreshWDT via
+# PLAT_SYS_KickWatchDog) and participates in appmgr/privserver/semaphore/STR flow.
+# Killing aurora without replacing kicks can trigger reset (~20-30s). v0.1 experiments
+# with Linux /dev/watchdog kicker are best-effort; platform WDT may be separate.
+watchdog_kick = best-effort

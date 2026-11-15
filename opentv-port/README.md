@@ -1,0 +1,97 @@
+# OpenTV MB230 port (first tryable sidecar)
+
+Early, **tryable** port scaffold to run OpenTV-style userspace on a Vestel **17MB230** (Novatek NT72671/NT72673, ARMv7 Cortex-A7, Linux 4.9 "Kylo") in a **CyanogenMod-like** model:
+
+- **Keep vendor base:** stock kernel, drivers, and low-level/vendor libraries (DirectFB/Mali/NVT media/platform stack) remain in place.
+- **OpenTV on top as sidecar:** this package installs a small ARM userspace binary + keeper that can run alongside the stock system, with a path toward replacing/augmenting the UI layer via MB230-specific backends (display/input/liveness).
+
+Reference prototype: `/home/dorin/Downloads/open-tv-launcher` (`os/` gateway + UI/launcher). QEMU is for testing there; MB230 needs vendor-native backends and liveness-aware integration.
+
+> **Status: v0.1 (first version to try).** Safe default is **sidecar mode** (no kill of `aurora.elf`). UI takeover / "render on top" without reboot is the main open problem (see `docs/REBOOT_AND_LIVENESS.md`).
+
+## Contents
+
+- `src/otv_port.c` — minimal OpenTV port shell (fbdev UI, UART IR/GPIO input probe, optional `/dev/watchdog` kicker, logging).
+- `otv_port` — **prebuilt** static ARMv7 EABI5 hard-float binary (first tryable artifact).
+- `build-docker.sh` / `Makefile` — reproducible Docker/native cross-build.
+- `installer.sh` — on-TV installer to `/conf/opentv-port` (persistent), starts keeper, can arm auto-load hook.
+- `run-on-tv.sh` — manual runner (sidecar/takeover).
+- `docs/REBOOT_AND_LIVENESS.md` — reboot-on-kill evidence and bypass strategies.
+- `docs/device.conf.mb230.example` — planned MB230 gateway/device mapping for full `os/` port.
+
+## Quick install (on TV, via root telnet)
+
+Prereq: root shell on TV (e.g. `telnet <tv-ip> 23`) and a way to transfer files (wget/LAN HTTP or `nc`).
+
+```sh
+mkdir -p /tmp/otv-port-pkg && cd /tmp/otv-port-pkg
+# copy installer.sh and otv_port into this directory, then:
+chmod +x installer.sh otv_port
+sh installer.sh
+```
+
+Installer behavior (idempotent, defaults):
+- installs to **`/conf/opentv-port`** (persistent UBIFS) and writes `mode.env`, `keeper.sh`, `run-on-tv.sh`
+- starts background keeper now and (if `AUTOLOAD=1`, default) appends a **guarded, reversible** hook to `/conf/opentv_payload` **only when it is a plain shell script** (backup: `/conf/opentv_payload.bak.otvport`)
+- default **`MODE=sidecar`**: runs alongside stock `aurora.elf` (no process kills)
+
+Logs: `/tmp/otv_port.log`, `/conf/opentv-port/keeper.log`, `/conf/opentv-port/otv_port.stdout.log`.
+
+## Run modes
+
+### Sidecar (default, recommended first)
+
+```sh
+/conf/opentv-port/run-on-tv.sh sidecar
+# or: /conf/opentv-port/otv_port
+```
+
+- Does **not** kill `aurora.elf`/idtv/appmgr (preserves platform liveness/watchdog kicks).
+- Attempts to draw to `/dev/fb0` and probe `/dev/ttyS2` + `/dev/ntgpio`.
+- **Limitation:** while aurora owns display/IR, on-screen visibility and input events may be unavailable/conflicted. Useful to confirm the binary runs, logs, and device access on stock firmware.
+
+### Takeover (experimental, may reboot)
+
+```sh
+/conf/opentv-port/run-on-tv.sh takeover
+# or set MODE=takeover in /conf/opentv-port/mode.env for keeper behavior
+```
+
+- Stops `aurora.elf`/idtv/appmgr and runs `otv_port --kick-wdt` as foreground UI.
+- **Risk:** killing aurora can stop MCU/STBC watchdog refresh; device may **reboot in ~20–30s** if platform watchdog is not satisfied. `--kick-wdt` best-effort pets Linux `/dev/watchdog*` if present, but the controlling WDT may be MCU/STBC-only. Keep telnet/USB recovery available. Do not use unattended until validated.
+
+## Auto-load
+
+- `installer.sh` (default `AUTOLOAD=1`) adds a guarded block between `# --- OPENTV_PORT_HOOK_BEGIN/END ---` to `/conf/opentv_payload` when it is a shell script, starting `keeper.sh` once in background (similar to Dropbear keeper hook). **Remove that block** or set `MODE=disabled` handling / uninstall to revert.
+- If `/conf/opentv_payload` is absent or binary, hook manually from your boot flow: `INSTALL_DIR=/conf/opentv-port sh /conf/opentv-port/keeper.sh &` (ensure it runs in a long-lived keeper context).
+- Keeper defaults to **sidecar** to avoid boot/reboot loops.
+
+## Reboot prevention / render-on-top (current understanding)
+
+See **`docs/REBOOT_AND_LIVENESS.md`** for evidence-backed analysis. Summary:
+
+- **Primary liveness:** aurora kicks MCU/STBC watchdog via `PLAT_SYS_KickWatchDog` → `NDAL_VideoExt_STBC_FreshWDT` and participates in appmgr/privserver/semaphore/STR flow. Killing aurora removes kicks → likely MCU WDT reset.
+- **V0.1 mitigation attempts:** `--kick-wdt` pets `/dev/watchdog*` if available (best-effort; may not be the same WDT). True bypass likely requires either keeping aurora alive, a shim that performs platform WDT kicks (NDAL/STBC access) and satisfies appmgr contracts, or deeper integration.
+- **Render-on-top priority:** blocked by display/input ownership (DirectFB/sawman planes, UART IR `/dev/ttyS2` owned by aurora) and liveness coupling. Next steps: MB230 gateway backends (`display-directfb`/fbdev, `input-uart-ir` bridge) + cooperative or replacing-liveness strategy.
+
+## Build (reproduce binary)
+
+```sh
+cd usb-injection/tools/opentv-port
+./build-docker.sh
+# or: make docker
+# produces: ./otv_port (ELF 32-bit ARM, EABI5, static)
+```
+
+## Mapping to OpenTV `os/` (next porting steps)
+
+- Cross-build OpenTV `ui`/`launcher` core for **ARMv7hf** (Linux 4.9, firmware-lib compatible).
+- Implement MB230 gateway backends per `docs/device.conf.mb230.example`: **DirectFB** (preferred, vendor stack) or fbdev display; **UART-IR** (`/dev/ttyS2`/`/dev/ntgpio`) input mapped to `gw_key`; storage under `/conf`/`/buffer`.
+- Integrate without breaking liveness (keep aurora alive, or replace kicks/contracts). Iterate toward launcher UI parity with prototype.
+
+## Safety / notes
+
+- Research on owned hardware. No firmware images, dumps, or device secrets are included or should be committed.
+- Do **not** modify signed boot components. Prefer reversible `/conf` changes and keep USB recovery/restore scripts available.
+- `/tmp` is cleared on reboot; persistent state goes to `/conf/opentv-port`.
+- `otv_port` is a v0.1 experiment, not a full launcher yet.
