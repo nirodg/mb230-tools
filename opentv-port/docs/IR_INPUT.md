@@ -56,7 +56,9 @@ Forward each dispatched (mapped) key from aurora to `otv_port`’s control socke
 - **Code cave:** `0x690100` (clean padding between `.gnu.version_r` and `.text`; the first attempt at `0x69003c` overlapped `.gnu.version_r` and corrupted the dynamic-linker version table).
 - **Forwarder** (`src/mempatch.c` `cave_blob`): raw-syscall only (`svc` for `socket`/`sendto`/`close`, `__NR` 281/290/6) — no libc/PLT lazy-binding; writes only to the stack (message buffer) and read-only cave (sockaddr `/tmp/otv_port.sock`); preserves `r0` (key), `r1` (=0x4000 for the skipped `mov.w r1,#16384`), `r4-r7`, and original `lr`; then `b.w 0x761cfc` into the intact prologue. Sends 5-byte datagram `'K' + key(LE)`.
 - **Key semantics (observed):** each physical press yields a press code (e.g. volup = `0x221`) and a release code = press + `0x7d0` (2000), e.g. `0x9f1` (matches `ice_KeyEventDispatchThread` `+2000` release offset). `otv_port` labels `KEY <code>` / `REL <code>`.
-- **Tooling:** `src/mempatch.c` (static ARM binary) — `mempatch <pid> apply|restore` via `PTRACE_ATTACH`/`POKEDATA`; backs up original bytes to `/tmp/irpatch.orig`. Live/in-memory only (re-apply after aurora restart/reboot).
+- **Tooling:** `src/mempatch.c` (static ARM binary) — `mempatch <pid> tap|suppress|apply|restore` via `PTRACE_ATTACH`/`POKEDATA`; backs up original bytes to `/tmp/irpatch.orig`. Live/in-memory only (re-apply after aurora restart/reboot).
+  - `tap`/`apply`: forward keys and let aurora still handle them.
+  - `suppress`: forward keys; pass through only `KeyPower`/suspend (543/0x21F) and `KeySleep` (574) to aurora, early-return for all other keys so aurora ignores them (input takeover). Use with `otv_port --fullscreen`; `KeyExit` (528) in `otv_port` restores the patch and quits back to stock aurora.
 - **Caveats:** patch is volatile (memory only); target addresses are exact for this firmware build (`aurora.elf` sha256 `c7f1c7b5…6084b`); must match the running image. No NAND/flash changes.
 
 ## Validation / safety notes

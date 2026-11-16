@@ -189,7 +189,13 @@ case "$MODE" in
     done
     ;;
   sidecar|*)
+    EXIT_FLAG="$INSTALL_DIR/.exit_requested"
     while :; do
+      if [ -f "$EXIT_FLAG" ]; then
+        # Intentional exit (e.g. KeyExit). Do not auto-restart until flag cleared.
+        sleep 10
+        continue
+      fi
       start_sidecar || true
       sleep 10
     done
