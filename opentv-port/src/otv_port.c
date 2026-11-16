@@ -31,8 +31,10 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -345,11 +347,14 @@ static void usage(const char *a) {
     fprintf(stderr,
         "Usage: %s [--dfb] [--fbdev] [--no-ui] [--no-input] [--fb PATH] [--fb-index N]\n"
         "           [--kick-wdt] [--wdt-interval-ms N] [--redraw-ms N]\n"
+        "           [--cmd-socket PATH] [--no-cmd]\n"
         "  --dfb            render via DirectFB (window overlay preferred, layer-surface fallback)\n"
         "  --fbdev          render via raw framebuffer mmap (fallback)\n"
         "  --kick-wdt       best-effort Linux /dev/watchdog* kick (platform WDT may be MCU/STBC)\n"
         "  --wdt-interval-ms N  kick interval (default 1000)\n"
         "  --redraw-ms N    UI redraw interval ms (default 500, reduces compositor contention)\n"
+        "  --cmd-socket PATH  unix datagram socket for IPC/control (default /tmp/otv_port.sock)\n"
+        "  --no-cmd         disable IPC/control socket\n"
         "  --no-ui          no display rendering\n"
         "  --no-input       do not probe ttyS2/ntgpio\n"
         "  --fb PATH / --fb-index N  fbdev device (for --fbdev)\n", a);
@@ -358,6 +363,8 @@ static void usage(const char *a) {
 int main(int argc, char **argv) {
     int ui = 1, probe_input = 1, want_dfb = 1, force_fbdev = 0;
     int redraw_ms = 500; /* gentle redraw to reduce fusion/compositor contention */
+    const char *cmd_sock_path = "/tmp/otv_port.sock";
+    int cmd_enabled = 1;
     Wdkick wd; memset(&wd,0,sizeof(wd)); wd.interval_ms = 1000;
     const char *fbdev = getenv("FRAMEBUFFER"); char fbpath[32]; fbpath[0]='\0';
 
@@ -367,10 +374,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--kick-wdt")) wd.enabled = 1;
         else if (!strcmp(argv[i],"--no-ui")) ui = 0;
         else if (!strcmp(argv[i],"--no-input")) probe_input = 0;
+        else if (!strcmp(argv[i],"--no-cmd")) cmd_enabled = 0;
         else if (!strcmp(argv[i],"--fb") && i+1<argc) fbdev = argv[++i];
         else if (!strcmp(argv[i],"--fb-index") && i+1<argc) { snprintf(fbpath,sizeof(fbpath),"/dev/fb%s",argv[++i]); fbdev=fbpath; }
         else if (!strcmp(argv[i],"--wdt-interval-ms") && i+1<argc) { wd.interval_ms=atoi(argv[++i]); if (wd.interval_ms<100) wd.interval_ms=100; }
         else if (!strcmp(argv[i],"--redraw-ms") && i+1<argc) { redraw_ms=atoi(argv[++i]); if (redraw_ms<50) redraw_ms=50; if (redraw_ms>5000) redraw_ms=5000; }
+        else if (!strcmp(argv[i],"--cmd-socket") && i+1<argc) cmd_sock_path = argv[++i];
         else if (!strcmp(argv[i],"-h") || !strcmp(argv[i],"--help")) { usage(argv[0]); return 0; }
     }
     if (!fbdev) fbdev = "/dev/fb0";
@@ -379,7 +388,7 @@ int main(int argc, char **argv) {
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
     signal(SIGHUP,on_sig);
-    { char m[160]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.6 (sidecar, redraw %dms)", redraw_ms); logmsg(m); }
+    { char m[160]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.7 (sidecar, redraw %dms)", redraw_ms); logmsg(m); }
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -403,12 +412,29 @@ int main(int argc, char **argv) {
         } else { char m[128]; snprintf(m,sizeof(m),"open %s failed (no UI)",fbdev); logmsg(m); }
     }
 
-    int ttyfd=-1, gpiofd=-1;
+    int ttyfd=-1, gpiofd=-1, cmdfd=-1;
     if (probe_input) {
         ttyfd=open("/dev/ttyS2",O_RDONLY|O_NONBLOCK);
         gpiofd=open("/dev/ntgpio",O_RDONLY|O_NONBLOCK);
         if (ttyfd>=0){ set_raw(ttyfd); logmsg("input: /dev/ttyS2 opened"); } else logmsg("input: /dev/ttyS2 unavailable (aurora may own it)");
         if (gpiofd>=0) logmsg("input: /dev/ntgpio opened");
+    }
+    if (cmd_enabled && cmd_sock_path && *cmd_sock_path) {
+        unlink(cmd_sock_path);
+        cmdfd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (cmdfd >= 0) {
+            struct sockaddr_un sa; memset(&sa,0,sizeof(sa)); sa.sun_family = AF_UNIX;
+            snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", cmd_sock_path);
+            if (bind(cmdfd, (struct sockaddr*)&sa, sizeof(sa)) == 0) {
+                fcntl(cmdfd, F_SETFL, fcntl(cmdfd,F_GETFL,0) | O_NONBLOCK);
+                char m[160]; snprintf(m,sizeof(m),"ipc: command socket ready %s (send e.g. KEY OK, QUIT, PING)", cmd_sock_path); logmsg(m);
+            } else {
+                char m[160]; snprintf(m,sizeof(m),"ipc: bind failed for %s: %s", cmd_sock_path, strerror(errno)); logmsg(m);
+                close(cmdfd); cmdfd = -1;
+            }
+        } else {
+            logmsg("ipc: socket() failed");
+        }
     }
 
     unsigned long events=0, frames=0; long last_any=0, last_draw=0, start=now_ms(); char last_src[16]="-"; unsigned char last_bytes[16]; int last_n=0;
@@ -450,7 +476,7 @@ int main(int argc, char **argv) {
             int tx = px + 40, ty = py + 30;
             void (*Rtext)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb2 : fb_rect_cb;
             draw_text_common(tx, ty, 6, "OPENTV PORT", 245,247,251, Rtext, ctx);
-            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.5", 140,190,255, Rtext, ctx);
+            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.7", 140,190,255, Rtext, ctx);
             draw_text_common(tx, ty+120, 3, "VENDOR BASE + OPENTV USERSPACE", 180,220,180, Rtext, ctx);
             char line[96];
             const char *rname = "FBDEV";
@@ -467,6 +493,9 @@ int main(int argc, char **argv) {
                 for (int i=0;i<last_n && i<8 && off<(int)sizeof(hex)-4;i++) off+=snprintf(hex+off,sizeof(hex)-off,"%02X ",last_bytes[i]);
                 draw_text_common(tx, ty+330, 3, hex, 180,220,220, Rtext, ctx);
             }
+            char ipc[96];
+            if (cmdfd>=0) snprintf(ipc,sizeof(ipc),"IPC: %s", cmd_sock_path); else snprintf(ipc,sizeof(ipc),"IPC: OFF");
+            draw_text_common(tx, ty+360, 2, ipc, 160,200,160, Rtext, ctx);
             if (t-last_any < 1200) draw_text_common(tx, ty+400, 4, "INPUT RECEIVED", 80,255,140, Rtext, ctx);
             else draw_text_common(tx, ty+400, 4, "SIDECAR READY", 170,170,190, Rtext, ctx);
             draw_text_common(tx, py+ph-30, 2, "AURORA ALIVE. WINDOW OVERLAY PERSISTS ACROSS INPUT.", 220,180,150, Rtext, ctx);
@@ -476,6 +505,7 @@ int main(int argc, char **argv) {
         fd_set rfds; FD_ZERO(&rfds); int maxfd=-1;
         if (ttyfd>=0){ FD_SET(ttyfd,&rfds); if(ttyfd>maxfd) maxfd=ttyfd; }
         if (gpiofd>=0){ FD_SET(gpiofd,&rfds); if(gpiofd>maxfd) maxfd=gpiofd; }
+        if (cmdfd>=0){ FD_SET(cmdfd,&rfds); if(cmdfd>maxfd) maxfd=cmdfd; }
         long wait_ms = redraw_ms - (now_ms() - last_draw);
         if (wait_ms < 20) wait_ms = 20;
         if (wait_ms > 200) wait_ms = 200;
@@ -483,15 +513,27 @@ int main(int argc, char **argv) {
         int sel = (maxfd>=0)?select(maxfd+1,&rfds,NULL,NULL,&tv):0;
         if (sel==0 && maxfd<0) usleep(wait_ms * 1000);
         if (sel>0) {
-            unsigned char buf[64];
+            unsigned char buf[128];
             if (ttyfd>=0 && FD_ISSET(ttyfd,&rfds)) { int n=read(ttyfd,buf,sizeof(buf)); if(n>0){ events++; last_any=now_ms(); last_n=n<16?n:16; memcpy(last_bytes,buf,last_n); snprintf(last_src,sizeof(last_src),"TTYS2"); char m[128]; snprintf(m,sizeof(m),"ttyS2 %d bytes",n); logmsg(m);} }
             if (gpiofd>=0 && FD_ISSET(gpiofd,&rfds)) { int n=read(gpiofd,buf,sizeof(buf)); if(n>0){ events++; last_any=now_ms(); last_n=n<16?n:16; memcpy(last_bytes,buf,last_n); snprintf(last_src,sizeof(last_src),"GPIO"); char m[128]; snprintf(m,sizeof(m),"ntgpio %d bytes",n); logmsg(m);} }
+            if (cmdfd>=0 && FD_ISSET(cmdfd,&rfds)) {
+                char cbuf[256]; ssize_t n = recvfrom(cmdfd, cbuf, sizeof(cbuf)-1, 0, NULL, NULL);
+                if (n > 0) {
+                    cbuf[n] = '\0';
+                    while (n>0 && (cbuf[n-1]=='\n' || cbuf[n-1]=='\r' || cbuf[n-1]==' ')) cbuf[--n]='\0';
+                    events++; last_any=now_ms(); snprintf(last_src,sizeof(last_src),"IPC");
+                    last_n = n<16?(int)n:16; memcpy(last_bytes,cbuf,last_n);
+                    char m[320]; snprintf(m,sizeof(m),"ipc cmd: %s", cbuf); logmsg(m);
+                    if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) g_run = 0;
+                }
+            }
         }
     }
 
     logmsg("stopping");
     if (ttyfd>=0) close(ttyfd);
     if (gpiofd>=0) close(gpiofd);
+    if (cmdfd>=0) { close(cmdfd); if (cmd_enabled && cmd_sock_path) unlink(cmd_sock_path); }
     if (use_dfb) dfb_shutdown(&dfb);
     if (fb.fb) munmap(fb.fb, fb.smem_len);
     if (fb.fd>=0) close(fb.fd);
