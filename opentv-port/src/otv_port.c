@@ -554,13 +554,24 @@ int main(int argc, char **argv) {
                     while (n>0 && (cbuf[n-1]=='\n' || cbuf[n-1]=='\r' || cbuf[n-1]==' ')) cbuf[--n]='\0';
                     events++; last_any=now_ms(); snprintf(last_src,sizeof(last_src),"IPC");
                     last_n = n<16?(int)n:16; memcpy(last_bytes,cbuf,last_n);
-                    snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "%s", cbuf);
-                    char m[320]; snprintf(m,sizeof(m),"ipc cmd: %s", cbuf); logmsg(m);
-                    if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) g_run = 0;
-                    else if (!strncasecmp(cbuf,"RAISE",5)) { if (g_ctrl_win && g_ctrl_raise) g_ctrl_raise(g_ctrl_win); }
-                    else if (!strncasecmp(cbuf,"OPACITY ",8)) { int v=atoi(cbuf+8); if(v<0)v=0; if(v>255)v=255; if(g_ctrl_win && g_ctrl_set_opacity) g_ctrl_set_opacity(g_ctrl_win,(uint8_t)v); }
-                    else if (!strncasecmp(cbuf,"MOVE ",5)) { int x=0,y=0; if(sscanf(cbuf+5,"%d %d",&x,&y)>=1 && g_ctrl_win && g_ctrl_move) g_ctrl_move(g_ctrl_win,x,y); }
-                    else if (!strncasecmp(cbuf,"RESIZE ",7)) { int w=0,h=0; if(sscanf(cbuf+7,"%d %d",&w,&h)==2 && g_ctrl_win && g_ctrl_resize) g_ctrl_resize(g_ctrl_win,w,h); }
+                    if (n == 5 && (unsigned char)cbuf[0] == 0x4b) { /* binary key: 'K' + 4-byte LE key */
+                        unsigned long k = (unsigned char)cbuf[1] | ((unsigned long)(unsigned char)cbuf[2] << 8) | ((unsigned long)(unsigned char)cbuf[3] << 16) | ((unsigned long)(unsigned char)cbuf[4] << 24);
+                        if (k >= 2000) { /* release event = press code + 2000 (0x7d0) */
+                            snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "REL 0x%lx", k - 2000);
+                            char mk[128]; snprintf(mk, sizeof(mk), "ipc key release 0x%lx", k - 2000); logmsg(mk);
+                        } else {
+                            snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "KEY 0x%lx", k);
+                            char mk[128]; snprintf(mk, sizeof(mk), "ipc key press 0x%lx", k); logmsg(mk);
+                        }
+                    } else {
+                        snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "%s", cbuf);
+                        char m[320]; snprintf(m,sizeof(m),"ipc cmd: %s", cbuf); logmsg(m);
+                        if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) g_run = 0;
+                        else if (!strncasecmp(cbuf,"RAISE",5)) { if (g_ctrl_win && g_ctrl_raise) g_ctrl_raise(g_ctrl_win); }
+                        else if (!strncasecmp(cbuf,"OPACITY ",8)) { int v=atoi(cbuf+8); if(v<0)v=0; if(v>255)v=255; if(g_ctrl_win && g_ctrl_set_opacity) g_ctrl_set_opacity(g_ctrl_win,(uint8_t)v); }
+                        else if (!strncasecmp(cbuf,"MOVE ",5)) { int x=0,y=0; if(sscanf(cbuf+5,"%d %d",&x,&y)>=1 && g_ctrl_win && g_ctrl_move) g_ctrl_move(g_ctrl_win,x,y); }
+                        else if (!strncasecmp(cbuf,"RESIZE ",7)) { int w=0,h=0; if(sscanf(cbuf+7,"%d %d",&w,&h)==2 && g_ctrl_win && g_ctrl_resize) g_ctrl_resize(g_ctrl_win,w,h); }
+                    }
                 }
             }
         }
