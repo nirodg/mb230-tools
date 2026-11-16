@@ -41,6 +41,10 @@
 
 static volatile sig_atomic_t g_run = 1;
 
+static unsigned int g_win_x = 40, g_win_y = 40, g_win_w = 800, g_win_h = 500;
+static unsigned int g_win_caps = 0x1, g_win_stacking = 2;
+static char g_last_ipc_cmd[48] = "-";
+
 typedef int DFBResult;
 typedef DFBResult (*DFBInitFn)(int *argc, char **argv[]);
 typedef DFBResult (*DFBCreateFn)(void **interface);
@@ -145,25 +149,27 @@ static int dfb_try_window(DFB *d, unsigned int layer_id) {
     CreateWindowFn createWindow = (CreateWindowFn)lv[33];
     if (!createWindow) { logmsg("dfb: layer CreateWindow unavailable"); return -1; }
 
-    const unsigned int stackings[] = {2u, 1u};
-    const unsigned int capsvals[]  = {0x1u, 0x11u, 0x2u};
+    const unsigned int stackings[] = {g_win_stacking, (g_win_stacking==2u)?1u:2u};
+    const unsigned int capsvals[]  = {g_win_caps, 0x11u, 0x2u, 0x1u};
     for (int si = 0; si < 2; si++) {
-        for (int ci = 0; ci < 3; ci++) {
+        for (int ci = 0; ci < 4; ci++) {
+            unsigned int cv = capsvals[ci];
+            if (ci > 0 && cv == g_win_caps) continue;
             uint32_t desc[64]; memset(desc, 0, sizeof(desc));
             unsigned int flags = (1u<<0)|(1u<<1)|(1u<<2)|(1u<<3)|(1u<<4)|(1u<<5)|(1u<<6)|(1u<<9);
             desc[0] = flags;
-            desc[1] = capsvals[ci];
-            desc[2] = 800;      /* width */
-            desc[3] = 500;      /* height */
+            desc[1] = cv;
+            desc[2] = g_win_w;
+            desc[3] = g_win_h;
             desc[4] = 0;        /* pixelformat */
-            desc[5] = 40;       /* posx */
-            desc[6] = 40;       /* posy */
+            desc[5] = g_win_x;  /* posx */
+            desc[6] = g_win_y;  /* posy */
             desc[7] = 0;        /* surface_caps */
             desc[10]= stackings[si];
             void *win = NULL;
             DFBResult r = createWindow(d->layer, desc, &win);
             if (r || !win) {
-                char m[192]; snprintf(m,sizeof(m),"dfb: CreateWindow try caps=0x%x stacking=%u failed %d %s", desc[1], desc[10], r, dfb_err(d,r));
+                char m[192]; snprintf(m,sizeof(m),"dfb: CreateWindow try caps=0x%x stacking=%u %ux%u@%u,%u failed %d %s", desc[1], desc[10], desc[2], desc[3], desc[5], desc[6], r, dfb_err(d,r));
                 logmsg(m);
                 continue;
             }
@@ -355,6 +361,9 @@ static void usage(const char *a) {
         "  --redraw-ms N    UI redraw interval ms (default 500, reduces compositor contention)\n"
         "  --cmd-socket PATH  unix datagram socket for IPC/control (default /tmp/otv_port.sock)\n"
         "  --no-cmd         disable IPC/control socket\n"
+        "  --win-x N --win-y N --win-w N --win-h N  window geometry (default 40,40,800,500)\n"
+        "  --win-caps 0xN   window caps (default 0x1)\n"
+        "  --win-stacking N window stacking class (default 2/UPPER)\n"
         "  --no-ui          no display rendering\n"
         "  --no-input       do not probe ttyS2/ntgpio\n"
         "  --fb PATH / --fb-index N  fbdev device (for --fbdev)\n", a);
@@ -380,6 +389,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--wdt-interval-ms") && i+1<argc) { wd.interval_ms=atoi(argv[++i]); if (wd.interval_ms<100) wd.interval_ms=100; }
         else if (!strcmp(argv[i],"--redraw-ms") && i+1<argc) { redraw_ms=atoi(argv[++i]); if (redraw_ms<50) redraw_ms=50; if (redraw_ms>5000) redraw_ms=5000; }
         else if (!strcmp(argv[i],"--cmd-socket") && i+1<argc) cmd_sock_path = argv[++i];
+        else if (!strcmp(argv[i],"--win-x") && i+1<argc) g_win_x=(unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--win-y") && i+1<argc) g_win_y=(unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--win-w") && i+1<argc) { g_win_w=(unsigned)atoi(argv[++i]); if(g_win_w<100) g_win_w=100; }
+        else if (!strcmp(argv[i],"--win-h") && i+1<argc) { g_win_h=(unsigned)atoi(argv[++i]); if(g_win_h<80) g_win_h=80; }
+        else if (!strcmp(argv[i],"--win-caps") && i+1<argc) g_win_caps=(unsigned)strtoul(argv[++i],NULL,0);
+        else if (!strcmp(argv[i],"--win-stacking") && i+1<argc) g_win_stacking=(unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i],"-h") || !strcmp(argv[i],"--help")) { usage(argv[0]); return 0; }
     }
     if (!fbdev) fbdev = "/dev/fb0";
@@ -388,7 +403,7 @@ int main(int argc, char **argv) {
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
     signal(SIGHUP,on_sig);
-    { char m[160]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.7 (sidecar, redraw %dms)", redraw_ms); logmsg(m); }
+    { char m[200]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.8 (sidecar, redraw %dms, win %ux%u@%u,%u stack=%u caps=0x%x)", redraw_ms, g_win_w,g_win_h,g_win_x,g_win_y,g_win_stacking,g_win_caps); logmsg(m); }
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -476,7 +491,7 @@ int main(int argc, char **argv) {
             int tx = px + 40, ty = py + 30;
             void (*Rtext)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb2 : fb_rect_cb;
             draw_text_common(tx, ty, 6, "OPENTV PORT", 245,247,251, Rtext, ctx);
-            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.7", 140,190,255, Rtext, ctx);
+            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.8", 140,190,255, Rtext, ctx);
             draw_text_common(tx, ty+120, 3, "VENDOR BASE + OPENTV USERSPACE", 180,220,180, Rtext, ctx);
             char line[96];
             const char *rname = "FBDEV";
@@ -493,8 +508,8 @@ int main(int argc, char **argv) {
                 for (int i=0;i<last_n && i<8 && off<(int)sizeof(hex)-4;i++) off+=snprintf(hex+off,sizeof(hex)-off,"%02X ",last_bytes[i]);
                 draw_text_common(tx, ty+330, 3, hex, 180,220,220, Rtext, ctx);
             }
-            char ipc[96];
-            if (cmdfd>=0) snprintf(ipc,sizeof(ipc),"IPC: %s", cmd_sock_path); else snprintf(ipc,sizeof(ipc),"IPC: OFF");
+            char ipc[120];
+            if (cmdfd>=0) snprintf(ipc,sizeof(ipc),"IPC: %s  CMD: %.24s", cmd_sock_path, g_last_ipc_cmd); else snprintf(ipc,sizeof(ipc),"IPC: OFF");
             draw_text_common(tx, ty+360, 2, ipc, 160,200,160, Rtext, ctx);
             if (t-last_any < 1200) draw_text_common(tx, ty+400, 4, "INPUT RECEIVED", 80,255,140, Rtext, ctx);
             else draw_text_common(tx, ty+400, 4, "SIDECAR READY", 170,170,190, Rtext, ctx);
@@ -523,6 +538,7 @@ int main(int argc, char **argv) {
                     while (n>0 && (cbuf[n-1]=='\n' || cbuf[n-1]=='\r' || cbuf[n-1]==' ')) cbuf[--n]='\0';
                     events++; last_any=now_ms(); snprintf(last_src,sizeof(last_src),"IPC");
                     last_n = n<16?(int)n:16; memcpy(last_bytes,cbuf,last_n);
+                    snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "%s", cbuf);
                     char m[320]; snprintf(m,sizeof(m),"ipc cmd: %s", cbuf); logmsg(m);
                     if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) g_run = 0;
                 }
