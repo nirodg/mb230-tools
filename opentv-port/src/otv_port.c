@@ -46,6 +46,15 @@ static unsigned int g_win_caps = 0x1, g_win_stacking = 2;
 static char g_last_ipc_cmd[48] = "-";
 
 typedef int DFBResult;
+typedef DFBResult (*WinSetOpacityFn2)(void*, uint8_t);
+typedef DFBResult (*WinRaiseFn2)(void*);
+typedef DFBResult (*WinResizeFn)(void*, int, int);
+typedef DFBResult (*WinMoveToFn)(void*, int, int);
+static void *g_ctrl_win = NULL;
+static WinSetOpacityFn2 g_ctrl_set_opacity = NULL;
+static WinRaiseFn2 g_ctrl_raise = NULL;
+static WinResizeFn g_ctrl_resize = NULL;
+static WinMoveToFn g_ctrl_move = NULL;
 typedef DFBResult (*DFBInitFn)(int *argc, char **argv[]);
 typedef DFBResult (*DFBCreateFn)(void **interface);
 typedef const char* (*DFBErrorStringFn)(DFBResult result);
@@ -178,6 +187,11 @@ static int dfb_try_window(DFB *d, unsigned int layer_id) {
             WinSetOpacityFn setOpacity = (WinSetOpacityFn)wv[22];
             WinRaiseFn raiseToTop = (WinRaiseFn)wv[33];
             d->winRelease = (WinReleaseFn)wv[4];
+            g_ctrl_win = win;
+            g_ctrl_set_opacity = (WinSetOpacityFn2)setOpacity;
+            g_ctrl_raise = (WinRaiseFn2)raiseToTop;
+            g_ctrl_resize = (WinResizeFn)wv[14];
+            g_ctrl_move = (WinMoveToFn)wv[12];
             void *surf = NULL;
             r = getSurf ? getSurf(win, &surf) : -1;
             if (r || !surf) {
@@ -255,6 +269,7 @@ static void dfb_shutdown(DFB *d) {
         if (d->surf && d->surfRelease) d->surfRelease(d->surf);
         if (d->win && d->winRelease) d->winRelease(d->win);
     }
+    g_ctrl_win = NULL; g_ctrl_set_opacity = NULL; g_ctrl_raise = NULL; g_ctrl_resize = NULL; g_ctrl_move = NULL;
     d->surf = NULL; d->win = NULL; d->ok = 0;
 }
 
@@ -360,6 +375,7 @@ static void usage(const char *a) {
         "  --wdt-interval-ms N  kick interval (default 1000)\n"
         "  --redraw-ms N    UI redraw interval ms (default 500, reduces compositor contention)\n"
         "  --cmd-socket PATH  unix datagram socket for IPC/control (default /tmp/otv_port.sock)\n"
+        "                     commands: PING, KEY <name>, QUIT, RAISE, OPACITY <0-255>, MOVE <x> <y>, RESIZE <w> <h>\n"
         "  --no-cmd         disable IPC/control socket\n"
         "  --win-x N --win-y N --win-w N --win-h N  window geometry (default 40,40,800,500)\n"
         "  --win-caps 0xN   window caps (default 0x1)\n"
@@ -403,7 +419,7 @@ int main(int argc, char **argv) {
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
     signal(SIGHUP,on_sig);
-    { char m[200]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.8 (sidecar, redraw %dms, win %ux%u@%u,%u stack=%u caps=0x%x)", redraw_ms, g_win_w,g_win_h,g_win_x,g_win_y,g_win_stacking,g_win_caps); logmsg(m); }
+    { char m[220]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.9 (sidecar, redraw %dms, win %ux%u@%u,%u stack=%u caps=0x%x)", redraw_ms, g_win_w,g_win_h,g_win_x,g_win_y,g_win_stacking,g_win_caps); logmsg(m); }
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -491,7 +507,7 @@ int main(int argc, char **argv) {
             int tx = px + 40, ty = py + 30;
             void (*Rtext)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb2 : fb_rect_cb;
             draw_text_common(tx, ty, 6, "OPENTV PORT", 245,247,251, Rtext, ctx);
-            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.8", 140,190,255, Rtext, ctx);
+            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.9", 140,190,255, Rtext, ctx);
             draw_text_common(tx, ty+120, 3, "VENDOR BASE + OPENTV USERSPACE", 180,220,180, Rtext, ctx);
             char line[96];
             const char *rname = "FBDEV";
@@ -541,6 +557,10 @@ int main(int argc, char **argv) {
                     snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "%s", cbuf);
                     char m[320]; snprintf(m,sizeof(m),"ipc cmd: %s", cbuf); logmsg(m);
                     if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) g_run = 0;
+                    else if (!strncasecmp(cbuf,"RAISE",5)) { if (g_ctrl_win && g_ctrl_raise) g_ctrl_raise(g_ctrl_win); }
+                    else if (!strncasecmp(cbuf,"OPACITY ",8)) { int v=atoi(cbuf+8); if(v<0)v=0; if(v>255)v=255; if(g_ctrl_win && g_ctrl_set_opacity) g_ctrl_set_opacity(g_ctrl_win,(uint8_t)v); }
+                    else if (!strncasecmp(cbuf,"MOVE ",5)) { int x=0,y=0; if(sscanf(cbuf+5,"%d %d",&x,&y)>=1 && g_ctrl_win && g_ctrl_move) g_ctrl_move(g_ctrl_win,x,y); }
+                    else if (!strncasecmp(cbuf,"RESIZE ",7)) { int w=0,h=0; if(sscanf(cbuf+7,"%d %d",&w,&h)==2 && g_ctrl_win && g_ctrl_resize) g_ctrl_resize(g_ctrl_win,w,h); }
                 }
             }
         }
