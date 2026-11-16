@@ -7,7 +7,7 @@ Early, **tryable** port scaffold to run OpenTV-style userspace on a Vestel **17M
 
 Reference prototype: `/home/dorin/Downloads/open-tv-launcher` (`os/` gateway + UI/launcher). QEMU is for testing there; MB230 needs vendor-native backends and liveness-aware integration.
 
-> **Status: v0.1.2 (breakthrough, experimental).** Safe default is **sidecar mode** (no kill of `aurora.elf`). **Rendering on top is proven via DirectFB**: `otv_port` joins the running fusion/sawman session and draws to the primary display layer surface — user-confirmed visible UI alongside aurora. **Caveat:** an observed integrated-UI run was followed by a TV reset after ~seconds (cause TBD, see `docs/REBOOT_AND_LIVENESS.md`); treat as not yet stability-proven. Full takeover without reboot/replacing aurora liveness remains open.
+> **Status: v0.1.4 + window-overlay milestone (experimental).** Safe default is **sidecar mode** (no kill of `aurora.elf`). **Rendering on top proven two ways:** (1) `otv_port` DirectFB layer-surface draw on primary layer 0 (v0.1.4, visible but contends with aurora repaints), and (2) **sawman window overlay with corrected `DFBWindowDescription` layout** (RE of `IDirectFBDisplayLayer_CreateWindow` @ 0x4b358244, vendor `libdirectfb-1.7.so.1`) — on-device confirmed **visible and persistent across remote IR input and channel changes** on layer 0 with stacking=UPPER (e.g. `probe_dfb_window_desc 6 1 0x1 0 0 2`; "Change source" popup can appear on top). **Caveat:** intermittent DirectFB/fusion-related reboots observed in some states; exit/stability not fully characterized. Full takeover/liveness-bypass remains open. See `docs/REBOOT_AND_LIVENESS.md`.
 
 ## Contents
 
