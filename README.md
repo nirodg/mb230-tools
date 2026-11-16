@@ -10,6 +10,10 @@ Collection of tools used with the MB230 USB injection / jailbreak workflow.
 - [`dropbear/`](dropbear/) — Dropbear SSH server/client port for Vestel MB230
   (static ARMv7 binaries, on-TV installer, host keys in `/conf/dropbear`).
   Submodule: [nirodg/mb230-dropbear](https://github.com/nirodg/mb230-dropbear).
+- [`ota-killer/`](ota-killer/) — persistent OTA blocker: hosts override +
+  iptables backstop + firmware deny-version file, re-applied by a keeper hooked
+  into `/conf/opentv_payload`. Fully reversible.
+  Submodule: [nirodg/mb230-ota-killer](https://github.com/nirodg/mb230-ota-killer).
 - [`hello-world/`](hello-world/) — minimal ARMv7 "Hello World" proof app for
   telnet/root shell testing (prebuilt binary, Docker build).
   Submodule: [nirodg/mb230-hello-world](https://github.com/nirodg/mb230-hello-world).

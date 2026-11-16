@@ -10,3 +10,7 @@
 [submodule "apt"]
 	path = apt
 	url = git@github.com:nirodg/mb230-apt.git
+
+[submodule "ota-killer"]
+	path = ota-killer
+	url = git@github.com:nirodg/mb230-ota-killer.git
