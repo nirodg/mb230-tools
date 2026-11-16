@@ -344,11 +344,12 @@ static int set_raw(int fd) {
 static void usage(const char *a) {
     fprintf(stderr,
         "Usage: %s [--dfb] [--fbdev] [--no-ui] [--no-input] [--fb PATH] [--fb-index N]\n"
-        "           [--kick-wdt] [--wdt-interval-ms N]\n"
-        "  --dfb            render via DirectFB layer surface (default, joins fusion/sawman)\n"
-        "  --fbdev          render via raw framebuffer mmap (fallback; may be invisible under compositor)\n"
+        "           [--kick-wdt] [--wdt-interval-ms N] [--redraw-ms N]\n"
+        "  --dfb            render via DirectFB (window overlay preferred, layer-surface fallback)\n"
+        "  --fbdev          render via raw framebuffer mmap (fallback)\n"
         "  --kick-wdt       best-effort Linux /dev/watchdog* kick (platform WDT may be MCU/STBC)\n"
         "  --wdt-interval-ms N  kick interval (default 1000)\n"
+        "  --redraw-ms N    UI redraw interval ms (default 500, reduces compositor contention)\n"
         "  --no-ui          no display rendering\n"
         "  --no-input       do not probe ttyS2/ntgpio\n"
         "  --fb PATH / --fb-index N  fbdev device (for --fbdev)\n", a);
@@ -356,6 +357,7 @@ static void usage(const char *a) {
 
 int main(int argc, char **argv) {
     int ui = 1, probe_input = 1, want_dfb = 1, force_fbdev = 0;
+    int redraw_ms = 500; /* gentle redraw to reduce fusion/compositor contention */
     Wdkick wd; memset(&wd,0,sizeof(wd)); wd.interval_ms = 1000;
     const char *fbdev = getenv("FRAMEBUFFER"); char fbpath[32]; fbpath[0]='\0';
 
@@ -368,6 +370,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--fb") && i+1<argc) fbdev = argv[++i];
         else if (!strcmp(argv[i],"--fb-index") && i+1<argc) { snprintf(fbpath,sizeof(fbpath),"/dev/fb%s",argv[++i]); fbdev=fbpath; }
         else if (!strcmp(argv[i],"--wdt-interval-ms") && i+1<argc) { wd.interval_ms=atoi(argv[++i]); if (wd.interval_ms<100) wd.interval_ms=100; }
+        else if (!strcmp(argv[i],"--redraw-ms") && i+1<argc) { redraw_ms=atoi(argv[++i]); if (redraw_ms<50) redraw_ms=50; if (redraw_ms>5000) redraw_ms=5000; }
         else if (!strcmp(argv[i],"-h") || !strcmp(argv[i],"--help")) { usage(argv[0]); return 0; }
     }
     if (!fbdev) fbdev = "/dev/fb0";
@@ -375,7 +378,8 @@ int main(int argc, char **argv) {
     /* install our handlers early; dfb init uses no-sighandler to avoid
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
-    logmsg("starting OpenTV MB230 port v0.1.5 (sidecar)");
+    signal(SIGHUP,on_sig);
+    { char m[160]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.6 (sidecar, redraw %dms)", redraw_ms); logmsg(m); }
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -407,13 +411,14 @@ int main(int argc, char **argv) {
         if (gpiofd>=0) logmsg("input: /dev/ntgpio opened");
     }
 
-    unsigned long events=0, frames=0; long last_any=0, start=now_ms(); char last_src[16]="-"; unsigned char last_bytes[16]; int last_n=0;
+    unsigned long events=0, frames=0; long last_any=0, last_draw=0, start=now_ms(); char last_src[16]="-"; unsigned char last_bytes[16]; int last_n=0;
 
     while (g_run) {
         long t = now_ms();
         wdkick_tick(&wd, t);
 
-        if (ui && (use_dfb ? dfb.ok : (fb.fb!=NULL))) {
+        if (ui && (use_dfb ? dfb.ok : (fb.fb!=NULL)) && (t - last_draw >= redraw_ms)) {
+            last_draw = t;
             int W = use_dfb ? dfb.w : fb.w;
             int H = use_dfb ? dfb.h : fb.h;
             void (*R)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? NULL : fb_rect_cb;
@@ -450,7 +455,7 @@ int main(int argc, char **argv) {
             char line[96];
             const char *rname = "FBDEV";
             if (use_dfb) rname = (dfb.backend==1) ? "DFB-WIN" : "DFB-LAYER";
-            snprintf(line,sizeof(line),"UPTIME: %ld S  FRAMES: %lu  RENDER: %s", (t-start)/1000, ++frames, rname);
+            snprintf(line,sizeof(line),"UPTIME: %ld S  FRAMES: %lu  RENDER: %s  DRAW:%dMS", (t-start)/1000, ++frames, rname, redraw_ms);
             draw_text_common(tx, ty+190, 3, line, 230,230,150, Rtext, ctx);
             snprintf(line,sizeof(line),"INPUT EVENTS: %lu   LAST: %s", events, last_src);
             draw_text_common(tx, ty+230, 3, line, 230,230,150, Rtext, ctx);
@@ -471,9 +476,12 @@ int main(int argc, char **argv) {
         fd_set rfds; FD_ZERO(&rfds); int maxfd=-1;
         if (ttyfd>=0){ FD_SET(ttyfd,&rfds); if(ttyfd>maxfd) maxfd=ttyfd; }
         if (gpiofd>=0){ FD_SET(gpiofd,&rfds); if(gpiofd>maxfd) maxfd=gpiofd; }
-        struct timeval tv; tv.tv_sec=0; tv.tv_usec=120000;
+        long wait_ms = redraw_ms - (now_ms() - last_draw);
+        if (wait_ms < 20) wait_ms = 20;
+        if (wait_ms > 200) wait_ms = 200;
+        struct timeval tv; tv.tv_sec=0; tv.tv_usec = wait_ms * 1000;
         int sel = (maxfd>=0)?select(maxfd+1,&rfds,NULL,NULL,&tv):0;
-        if (sel==0 && maxfd<0) usleep(120000);
+        if (sel==0 && maxfd<0) usleep(wait_ms * 1000);
         if (sel>0) {
             unsigned char buf[64];
             if (ttyfd>=0 && FD_ISSET(ttyfd,&rfds)) { int n=read(ttyfd,buf,sizeof(buf)); if(n>0){ events++; last_any=now_ms(); last_n=n<16?n:16; memcpy(last_bytes,buf,last_n); snprintf(last_src,sizeof(last_src),"TTYS2"); char m[128]; snprintf(m,sizeof(m),"ttyS2 %d bytes",n); logmsg(m);} }
