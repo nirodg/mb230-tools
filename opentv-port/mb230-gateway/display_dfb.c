@@ -40,6 +40,7 @@ typedef DFBResult (*SurfGetSizeFn)(void *, int *, int *);
 typedef DFBResult (*SurfLockFn)(void *, unsigned int, void **, int *);
 typedef DFBResult (*SurfUnlockFn)(void *);
 typedef DFBResult (*SurfFlipFn)(void *, void *, unsigned int);
+typedef DFBResult (*SurfClearFn)(void *, unsigned char, unsigned char, unsigned char, unsigned char);
 typedef DFBResult (*SurfGetPixelFormatFn)(void *, unsigned int *);
 typedef DFBResult (*SurfReleaseFn)(void *);
 
@@ -52,6 +53,7 @@ static SurfGetSizeFn g_get_size;
 static SurfLockFn g_lock;
 static SurfUnlockFn g_unlock;
 static SurfFlipFn g_flip;
+static SurfClearFn g_clear;
 static SurfGetPixelFormatFn g_get_pf;
 static SurfReleaseFn g_surf_release;
 static WinReleaseFn g_win_release;
@@ -180,6 +182,7 @@ int gw_display_open(void)
 	g_lock = (SurfLockFn)sv[17];
 	g_unlock = (SurfUnlockFn)sv[19];
 	g_flip = (SurfFlipFn)sv[20];
+	g_clear = (SurfClearFn)sv[23];
 	g_surf_release = (SurfReleaseFn)sv[4];
 
 	if (g_set_opacity)
@@ -259,9 +262,16 @@ void gw_display_damage(int x, int y, int w, int h)
 
 void gw_display_close(void)
 {
-	if (g_surf && g_surf_release)
-		g_surf_release(g_surf);
-	g_surf = NULL;
+	/* erase our frame and drop the window so aurora's UI is revealed */
+	if (g_surf) {
+		if (g_clear)
+			g_clear(g_surf, 0, 0, 0, 0);
+		if (g_flip)
+			g_flip(g_surf, NULL, 0);
+		if (g_surf_release)
+			g_surf_release(g_surf);
+		g_surf = NULL;
+	}
 	if (g_win && g_win_release)
 		g_win_release(g_win);
 	g_win = NULL;

@@ -50,11 +50,19 @@ static void restore_patch(void)
 	}
 }
 
+/* full teardown: drop the DirectFB window (unfreeze the screen) and restore
+ * aurora's input before the process dies */
+static void cleanup_all(void)
+{
+	restore_patch();
+	gw_display_close();
+}
+
 static void on_term(int s)
 {
 	(void)s;
 	fprintf(stderr, "otv: signal %d — restoring aurora input\n", s);
-	restore_patch();
+	cleanup_all();
 	_exit(0);
 }
 
@@ -111,7 +119,7 @@ int gw_input_open(void)
 	signal(SIGTERM, on_term);
 	signal(SIGINT, on_term);
 	signal(SIGHUP, on_term);
-	atexit(restore_patch);
+	atexit(cleanup_all);
 	return 0;
 }
 
@@ -166,7 +174,7 @@ int gw_input_poll(gw_input_event *ev, int max, int timeout_ms)
 					   now_ms() - g_exit_press_ms >= EXIT_HOLD_MS) {
 					fprintf(stderr,
 						"otv: exit hold — restoring aurora input\n");
-					restore_patch();
+					cleanup_all();
 					exit(0);
 				}
 			}
