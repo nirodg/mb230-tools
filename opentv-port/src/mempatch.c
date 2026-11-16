@@ -20,6 +20,11 @@
 #define HOOK_LEN 4
 #define CAVE_LEN 121
 #define CAVE_SUPPRESS_LEN 184
+/* USB auto-play gate: Profile_IsUsbAutoPlayEnabled() — patch to return 0 so
+ * plugging a stick never auto-opens aurora's Media Browser over our UI. */
+#define AUTOPLAY_VA 0xc31314
+#define AUTOPLAY_LEN 4
+static const unsigned char autoplay_patch[AUTOPLAY_LEN] = {0x00,0x20,0x70,0x47}; /* movs r0,#0; bx lr */
 
 static const unsigned char hook_patch[4] = {0x2e,0xf7,0x02,0xba};
 static const unsigned char cave_tap[121] = {
@@ -107,31 +112,42 @@ int main(int argc, char **argv) {
 
     if (want_apply) {
         /* Preserve the ORIGINAL backup: if already patched (hook matches),
-         * don't overwrite the backup so a later restore returns to stock. */
+         * don't overwrite the backup so a later restore returns to stock.
+         * Backup layout: [hook 4][cave N][autoplay 4]. */
         unsigned char cur_hook[HOOK_LEN];
         read_bytes(pid, HOOK_VA, cur_hook, HOOK_LEN);
         int already = (memcmp(cur_hook, hook_patch, HOOK_LEN) == 0);
         if (!already) {
-            unsigned char orig_hook[HOOK_LEN], orig_cave[CAVE_SUPPRESS_LEN];
+            unsigned char orig_hook[HOOK_LEN], orig_cave[CAVE_SUPPRESS_LEN], orig_auto[AUTOPLAY_LEN];
             read_bytes(pid, HOOK_VA, orig_hook, HOOK_LEN);
             read_bytes(pid, CAVE_VA, orig_cave, cave_len);
+            read_bytes(pid, AUTOPLAY_VA, orig_auto, AUTOPLAY_LEN);
             int fd = open(origpath, O_WRONLY|O_CREAT|O_TRUNC, 0600);
-            if (fd >= 0) { write(fd, orig_hook, HOOK_LEN); write(fd, orig_cave, cave_len); close(fd); }
+            if (fd >= 0) {
+                write(fd, orig_hook, HOOK_LEN);
+                write(fd, orig_cave, cave_len);
+                write(fd, orig_auto, AUTOPLAY_LEN);
+                close(fd);
+            }
         }
         write_bytes(pid, HOOK_VA, hook_patch, HOOK_LEN);
         write_bytes(pid, CAVE_VA, cave, cave_len);
+        write_bytes(pid, AUTOPLAY_VA, autoplay_patch, AUTOPLAY_LEN);
         printf("patched pid %d mode=%s cave=%zu%s (backup %s)\n", pid, want_suppress?"suppress":"tap", cave_len, already?" [already patched]":"", origpath);
     } else {
         int fd = open(origpath, O_RDONLY);
         if (fd < 0) { perror("no backup"); ptrace(PTRACE_DETACH, pid, NULL, NULL); return 1; }
-        unsigned char orig[HOOK_LEN + CAVE_SUPPRESS_LEN];
+        unsigned char orig[HOOK_LEN + CAVE_SUPPRESS_LEN + AUTOPLAY_LEN];
         ssize_t n = read(fd, orig, sizeof(orig));
         if (n <= HOOK_LEN) { perror("short backup"); close(fd); ptrace(PTRACE_DETACH,pid,NULL,NULL); return 1; }
         close(fd);
-        size_t cave_len_b = (size_t)(n - HOOK_LEN);
+        /* new backups carry the autoplay bytes; legacy ones don't */
+        size_t cave_len_b = (n >= HOOK_LEN + AUTOPLAY_LEN) ? (size_t)(n - HOOK_LEN - AUTOPLAY_LEN) : (size_t)(n - HOOK_LEN);
         write_bytes(pid, HOOK_VA, orig, HOOK_LEN);
         write_bytes(pid, CAVE_VA, orig + HOOK_LEN, cave_len_b);
-        printf("restored pid %d (cave %zu bytes)\n", pid, cave_len_b);
+        if (n >= HOOK_LEN + cave_len_b + AUTOPLAY_LEN)
+            write_bytes(pid, AUTOPLAY_VA, orig + HOOK_LEN + cave_len_b, AUTOPLAY_LEN);
+        printf("restored pid %d (cave %zu bytes%s)\n", pid, cave_len_b, (n >= HOOK_LEN + cave_len_b + AUTOPLAY_LEN) ? " + autoplay" : "");
     }
 
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
