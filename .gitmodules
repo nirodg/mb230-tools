@@ -14,3 +14,7 @@
 [submodule "ota-killer"]
 	path = ota-killer
 	url = git@github.com:nirodg/mb230-ota-killer.git
+[submodule "opentv-port/open-tv-launcher"]
+	path = opentv-port/open-tv-launcher
+	url = git@github.com:nirodg/open-tv-launcher.git
+	branch = os-build
