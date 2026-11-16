@@ -41,12 +41,31 @@
 
 static volatile sig_atomic_t g_run = 1;
 
-static unsigned int g_win_x = 40, g_win_y = 40, g_win_w = 800, g_win_h = 500;
+static unsigned int g_win_x = 0, g_win_y = 0, g_win_w = 1920, g_win_h = 1080;
 static unsigned int g_win_caps = 0x1, g_win_stacking = 2;
 static char g_last_ipc_cmd[48] = "-";
 static unsigned long g_presses = 0, g_releases = 0, g_long_presses = 0, g_repeats = 0;
 static long g_last_press_ms = 0;
 static unsigned long g_last_press_key = 0, g_held_key = 0;
+static int g_nav_index = 0;      /* menu selection cursor (0..4) */
+static char g_nav_label[32] = "-";
+static const char *g_mempatch = "/conf/opentv-port/mempatch";
+static void logmsg(const char *msg);
+
+/* Apply the aurora block patch (suppress non-allowlist keys, forward to us).
+ * Returns 0 on success. Best-effort: if mempatch/aurora missing, log and continue. */
+static int aurora_patch(int do_apply) {
+    char cmd[256];
+    FILE *p = popen("pidof aurora.elf 2>/dev/null", "r");
+    int pid = 0;
+    if (p) { if (fscanf(p, "%d", &pid) != 1) pid = 0; pclose(p); }
+    if (pid <= 0) { logmsg("aurora pid not found; cannot patch input"); return -1; }
+    snprintf(cmd, sizeof(cmd), "%s %d %s >/dev/null 2>&1", g_mempatch, pid, do_apply ? "suppress" : "restore");
+    int rc = system(cmd);
+    char m[160]; snprintf(m, sizeof(m), "%s aurora input (pid=%d, rc=%d)", do_apply ? "blocked" : "restored", pid, rc);
+    logmsg(m);
+    return rc;
+}
 
 typedef int DFBResult;
 typedef DFBResult (*WinSetOpacityFn2)(void*, uint8_t);
@@ -58,53 +77,6 @@ static WinSetOpacityFn2 g_ctrl_set_opacity = NULL;
 static WinRaiseFn2 g_ctrl_raise = NULL;
 static WinResizeFn g_ctrl_resize = NULL;
 static WinMoveToFn g_ctrl_move = NULL;
-
-static int g_fullscreen = 0;
-static int g_exit_requested = 0;
-static const char *g_exit_flag_path = "/conf/opentv-port/.exit_requested";
-static const char *g_mempatch_path = "/conf/opentv-port/mempatch";
-
-static void logmsg(const char *msg);
-
-static int find_aurora_pid(void) {
-    /* Best-effort: find running aurora.elf pid. */
-    FILE *p = popen("pidof aurora.elf 2>/dev/null", "r");
-    int pid = 0;
-    if (p) { if (fscanf(p, "%d", &pid) != 1) pid = 0; pclose(p); }
-    if (pid <= 0) {
-        p = popen("pgrep -f aurora.elf 2>/dev/null | head -n1", "r");
-        if (p) { if (fscanf(p, "%d", &pid) != 1) pid = 0; pclose(p); }
-    }
-    return pid;
-}
-
-static void restore_aurora_input(void) {
-    /* Restore the in-memory aurora IR patch so stock input resumes. */
-    int pid = find_aurora_pid();
-    if (pid <= 0) { logmsg("exit: aurora pid not found; cannot restore input patch"); return; }
-    const char *paths[] = {g_mempatch_path, "/conf/opentv-port/mempatch", "/tmp/mempatch", NULL};
-    char cmd[256];
-    for (int i = 0; paths[i]; i++) {
-        if (access(paths[i], X_OK) != 0) continue;
-        snprintf(cmd, sizeof(cmd), "%s %d restore >/dev/null 2>&1", paths[i], pid);
-        int rc = system(cmd);
-        char m[160]; snprintf(m, sizeof(m), "exit: restored aurora input via %s pid=%d rc=%d", paths[i], pid, rc);
-        logmsg(m);
-        return;
-    }
-    logmsg("exit: mempatch binary not found; stock input may stay suppressed until aurora restart");
-}
-
-static void request_exit(const char *reason) {
-    char m[128]; snprintf(m, sizeof(m), "exit requested: %s", reason ? reason : "?");
-    logmsg(m);
-    g_exit_requested = 1;
-    g_run = 0;
-    /* Flag file tells keeper not to auto-restart after intentional exit. */
-    FILE *f = fopen(g_exit_flag_path, "w");
-    if (f) { fprintf(f, "1\n"); fclose(f); }
-    restore_aurora_input();
-}
 typedef DFBResult (*DFBInitFn)(int *argc, char **argv[]);
 typedef DFBResult (*DFBCreateFn)(void **interface);
 typedef const char* (*DFBErrorStringFn)(DFBResult result);
@@ -416,24 +388,23 @@ static int set_raw(int fd) {
 
 static void usage(const char *a) {
     fprintf(stderr,
-        "Usage: %s [--dfb] [--fbdev] [--fullscreen] [--no-ui] [--no-input] [--fb PATH]\n"
+        "Usage: %s [--dfb] [--fbdev] [--no-ui] [--no-input] [--fb PATH] [--fb-index N]\n"
         "           [--kick-wdt] [--wdt-interval-ms N] [--redraw-ms N]\n"
-        "           [--cmd-socket PATH] [--no-cmd] [--exit-flag PATH] [--mempatch PATH]\n"
+        "           [--cmd-socket PATH] [--no-cmd]\n"
         "  --dfb            render via DirectFB (window overlay preferred, layer-surface fallback)\n"
         "  --fbdev          render via raw framebuffer mmap (fallback)\n"
-        "  --fullscreen     fullscreen opaque window (1920x1080@0,0)\n"
         "  --kick-wdt       best-effort Linux /dev/watchdog* kick (platform WDT may be MCU/STBC)\n"
         "  --wdt-interval-ms N  kick interval (default 1000)\n"
-        "  --redraw-ms N    UI redraw interval ms (default 500)\n"
+        "  --redraw-ms N    UI redraw interval ms (default 500, reduces compositor contention)\n"
         "  --cmd-socket PATH  unix datagram socket for IPC/control (default /tmp/otv_port.sock)\n"
         "                     commands: PING, KEY <name>, QUIT, RAISE, OPACITY <0-255>, MOVE <x> <y>, RESIZE <w> <h>\n"
         "  --no-cmd         disable IPC/control socket\n"
-        "  --exit-flag PATH file written on intentional exit so keeper won't restart (default /conf/opentv-port/.exit_requested)\n"
-        "  --mempatch PATH  mempatch binary path used to restore aurora input on KeyExit\n"
         "  --win-x N --win-y N --win-w N --win-h N  window geometry (default 40,40,800,500)\n"
         "  --win-caps 0xN   window caps (default 0x1)\n"
         "  --win-stacking N window stacking class (default 2/UPPER)\n"
-        "  --no-ui / --no-input / --fb PATH / --fb-index N\n", a);
+        "  --no-ui          no display rendering\n"
+        "  --no-input       do not probe ttyS2/ntgpio\n"
+        "  --fb PATH / --fb-index N  fbdev device (for --fbdev)\n", a);
 }
 
 int main(int argc, char **argv) {
@@ -447,7 +418,6 @@ int main(int argc, char **argv) {
     for (int i=1;i<argc;i++) {
         if (!strcmp(argv[i],"--dfb")) { want_dfb = 1; force_fbdev = 0; }
         else if (!strcmp(argv[i],"--fbdev")) { force_fbdev = 1; want_dfb = 0; }
-        else if (!strcmp(argv[i],"--fullscreen")) g_fullscreen = 1;
         else if (!strcmp(argv[i],"--kick-wdt")) wd.enabled = 1;
         else if (!strcmp(argv[i],"--no-ui")) ui = 0;
         else if (!strcmp(argv[i],"--no-input")) probe_input = 0;
@@ -457,8 +427,6 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--wdt-interval-ms") && i+1<argc) { wd.interval_ms=atoi(argv[++i]); if (wd.interval_ms<100) wd.interval_ms=100; }
         else if (!strcmp(argv[i],"--redraw-ms") && i+1<argc) { redraw_ms=atoi(argv[++i]); if (redraw_ms<50) redraw_ms=50; if (redraw_ms>5000) redraw_ms=5000; }
         else if (!strcmp(argv[i],"--cmd-socket") && i+1<argc) cmd_sock_path = argv[++i];
-        else if (!strcmp(argv[i],"--exit-flag") && i+1<argc) g_exit_flag_path = argv[++i];
-        else if (!strcmp(argv[i],"--mempatch") && i+1<argc) g_mempatch_path = argv[++i];
         else if (!strcmp(argv[i],"--win-x") && i+1<argc) g_win_x=(unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i],"--win-y") && i+1<argc) g_win_y=(unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i],"--win-w") && i+1<argc) { g_win_w=(unsigned)atoi(argv[++i]); if(g_win_w<100) g_win_w=100; }
@@ -468,15 +436,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"-h") || !strcmp(argv[i],"--help")) { usage(argv[0]); return 0; }
     }
     if (!fbdev) fbdev = "/dev/fb0";
-    if (g_fullscreen) { g_win_x = 0; g_win_y = 0; g_win_w = 1920; g_win_h = 1080; }
 
     /* install our handlers early; dfb init uses no-sighandler to avoid
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
     signal(SIGHUP,on_sig);
-    { char m[240]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.10 (sidecar, redraw %dms, win %ux%u@%u,%u stack=%u caps=0x%x%s)", redraw_ms, g_win_w,g_win_h,g_win_x,g_win_y,g_win_stacking,g_win_caps, g_fullscreen?" fullscreen":""); logmsg(m); }
-    /* Clear intentional-exit flag on fresh start so keeper can manage restarts. */
-    unlink(g_exit_flag_path);
+    { char m[220]; snprintf(m,sizeof(m),"starting OpenTV MB230 port v0.1.9 (sidecar, redraw %dms, win %ux%u@%u,%u stack=%u caps=0x%x)", redraw_ms, g_win_w,g_win_h,g_win_x,g_win_y,g_win_stacking,g_win_caps); logmsg(m); }
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -524,6 +489,9 @@ int main(int argc, char **argv) {
             logmsg("ipc: socket() failed");
         }
     }
+    /* Apply the aurora block patch so keys are suppressed from aurora and
+     * forwarded to us. Best-effort. */
+    aurora_patch(1);
 
     unsigned long events=0, frames=0; long last_any=0, last_draw=0, start=now_ms(); char last_src[16]="-"; unsigned char last_bytes[16]; int last_n=0;
 
@@ -547,23 +515,13 @@ int main(int argc, char **argv) {
             if (ph > H - 20) ph = H - 20;
             if (pw < 100) pw = W;
             if (use_dfb) {
-                /* In fullscreen mode, opaque clear covers aurora; otherwise transparent. */
-                uint8_t bg_a = g_fullscreen ? 255 : 0;
-                dfb_rect_a(&dfb, 0, 0, W, H, 10, 14, 24, bg_a);
-                if (g_fullscreen) {
-                    /* Fullscreen opaque background + subtle frame. */
-                    dfb_rect_a(&dfb, 0, 0, W, H, 10, 14, 24, 255);
-                    dfb_rect_a(&dfb, 0, 0, W, 6, 70, 120, 200, 255);
-                    dfb_rect_a(&dfb, 0, H-6, W, 6, 70, 120, 200, 255);
-                    dfb_rect_a(&dfb, 0, 0, 6, H, 70, 120, 200, 255);
-                    dfb_rect_a(&dfb, W-6, 0, 6, H, 70, 120, 200, 255);
-                } else {
-                    dfb_rect_a(&dfb, px, py, pw, ph, 10, 14, 24, 210);
-                    dfb_rect_a(&dfb, px, py, pw, 4, 70, 120, 200, 230);
-                    dfb_rect_a(&dfb, px, py+ph-4, pw, 4, 70, 120, 200, 230);
-                    dfb_rect_a(&dfb, px, py, 4, ph, 70, 120, 200, 230);
-                    dfb_rect_a(&dfb, px+pw-4, py, 4, ph, 70, 120, 200, 230);
-                }
+                /* Fullscreen opaque background covers aurora. */
+                dfb_rect_a(&dfb, 0, 0, W, H, 10, 14, 24, 255);
+                dfb_rect_a(&dfb, px, py, pw, ph, 10, 14, 24, 210);
+                dfb_rect_a(&dfb, px, py, pw, 4, 70, 120, 200, 230);
+                dfb_rect_a(&dfb, px, py+ph-4, pw, 4, 70, 120, 200, 230);
+                dfb_rect_a(&dfb, px, py, 4, ph, 70, 120, 200, 230);
+                dfb_rect_a(&dfb, px+pw-4, py, 4, ph, 70, 120, 200, 230);
             } else {
                 R(ctx, 0, 0, W, H, 10, 14, 24);
                 R(ctx, px, py, pw, ph, 10, 14, 24);
@@ -576,30 +534,33 @@ int main(int argc, char **argv) {
             void (*Rtext)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb2 : fb_rect_cb;
             draw_text_common(tx, ty, 6, "OPENTV PORT", 245,247,251, Rtext, ctx);
             draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.10", 140,190,255, Rtext, ctx);
-            draw_text_common(tx, ty+120, 3, g_fullscreen ? "FULLSCREEN - EXIT KEY TO RETURN" : "VENDOR BASE + OPENTV USERSPACE", g_fullscreen ? 255 : 180, g_fullscreen ? 220 : 220, g_fullscreen ? 140 : 180, Rtext, ctx);
+            draw_text_common(tx, ty+120, 3, "FULLSCREEN - EXIT TO RETURN TO AURORA", 255,220,140, Rtext, ctx);
             char line[96];
             const char *rname = "FBDEV";
             if (use_dfb) rname = (dfb.backend==1) ? "DFB-WIN" : "DFB-LAYER";
-            snprintf(line,sizeof(line),"UPTIME: %ld S  FRAMES: %lu  RENDER: %s  DRAW:%dMS", (t-start)/1000, ++frames, rname, redraw_ms);
-            draw_text_common(tx, ty+190, 3, line, 230,230,150, Rtext, ctx);
+            snprintf(line,sizeof(line),"UPTIME: %ld S  FRAMES: %lu  RENDER: %s", (t-start)/1000, ++frames, rname);
+            draw_text_common(tx, ty+170, 3, line, 230,230,150, Rtext, ctx);
             snprintf(line,sizeof(line),"PRESS: %lu  REP: %lu  REL: %lu  LONG: %lu", g_presses, g_repeats, g_releases, g_long_presses);
-            draw_text_common(tx, ty+230, 3, line, 230,230,150, Rtext, ctx);
-            snprintf(line,sizeof(line),"RAW EVENTS: %lu   LAST: %s", events, last_src);
-            draw_text_common(tx, ty+258, 3, line, 180,180,180, Rtext, ctx);
-            if (wd.enabled) snprintf(line,sizeof(line),"WDT KICK: %s  KICKS=%lu ERR=%lu", wd.fd>=0?wd.path:"NONE", wd.kicks, wd.errors);
-            else snprintf(line,sizeof(line),"WDT KICK: OFF (PLATFORM/AURORA LIVENESS)");
-            draw_text_common(tx, ty+270, 3, line, 255,200,120, Rtext, ctx);
-            if (last_n>0) {
-                char hex[96]="LAST BYTES: "; int off=12;
-                for (int i=0;i<last_n && i<8 && off<(int)sizeof(hex)-4;i++) off+=snprintf(hex+off,sizeof(hex)-off,"%02X ",last_bytes[i]);
-                draw_text_common(tx, ty+330, 3, hex, 180,220,220, Rtext, ctx);
+            draw_text_common(tx, ty+210, 3, line, 230,230,150, Rtext, ctx);
+            /* Navigation menu */
+            {
+                static const char *items[] = {"ITEM 1","ITEM 2","ITEM 3","ITEM 4","ITEM 5"};
+                for (int i = 0; i < 5; i++) {
+                    int ry = ty + 250 + i*28;
+                    if (i == g_nav_index) {
+                        dfb_rect_a(&dfb, tx-6, ry-4, 260, 22, 70, 120, 200, 230);
+                        draw_text_common(tx, ry, 3, items[i], 255,255,120, Rtext, ctx);
+                    } else {
+                        draw_text_common(tx, ry, 3, items[i], 180,180,180, Rtext, ctx);
+                    }
+                }
             }
+            snprintf(line,sizeof(line),"NAV: %s", g_nav_label);
+            draw_text_common(tx, ty+400, 3, line, 120,220,140, Rtext, ctx);
+            draw_text_common(tx, ty+440, 3, "UP/DOWN/LEFT/RIGHT move, OK selects, EXIT returns", 160,200,160, Rtext, ctx);
             char ipc[120];
             if (cmdfd>=0) snprintf(ipc,sizeof(ipc),"IPC: %s  CMD: %.24s", cmd_sock_path, g_last_ipc_cmd); else snprintf(ipc,sizeof(ipc),"IPC: OFF");
-            draw_text_common(tx, ty+360, 2, ipc, 160,200,160, Rtext, ctx);
-            if (t-last_any < 1200) draw_text_common(tx, ty+400, 4, "INPUT RECEIVED", 80,255,140, Rtext, ctx);
-            else draw_text_common(tx, ty+400, 4, "SIDECAR READY", 170,170,190, Rtext, ctx);
-            draw_text_common(tx, py+ph-30, 2, "AURORA ALIVE. WINDOW OVERLAY PERSISTS ACROSS INPUT.", 220,180,150, Rtext, ctx);
+            draw_text_common(tx, ty+470, 2, ipc, 160,200,160, Rtext, ctx);
             if (use_dfb && dfb.flip) dfb.flip(dfb.surf, NULL, 0);
         }
 
@@ -652,13 +613,23 @@ int main(int argc, char **argv) {
                             g_last_press_key = k;
                             snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "KEY 0x%lx", k);
                             char mk[128]; snprintf(mk, sizeof(mk), "ipc key press 0x%lx", k); logmsg(mk);
-                            /* KeyExit (528/0x210): quit otv_port and restore aurora input. */
-                            if (k == 528) request_exit("KeyExit");
+                            /* Navigation + exit handling (ice_keymapping_db.xml):
+                             * KeyUp=522, KeyDown=523, KeyLeft=524, KeyRight=525,
+                             * KeySelect(OK)=526, KeyExit=528. */
+                            switch (k) {
+                                case 522: g_nav_index--; if (g_nav_index < 0) g_nav_index = 0; snprintf(g_nav_label,sizeof(g_nav_label),"UP"); break;
+                                case 523: g_nav_index++; if (g_nav_index > 4) g_nav_index = 4; snprintf(g_nav_label,sizeof(g_nav_label),"DOWN"); break;
+                                case 524: snprintf(g_nav_label,sizeof(g_nav_label),"LEFT"); break;
+                                case 525: snprintf(g_nav_label,sizeof(g_nav_label),"RIGHT"); break;
+                                case 526: snprintf(g_nav_label,sizeof(g_nav_label),"OK (select)"); break;
+                                case 528: logmsg("KeyExit: exiting otv_port, returning to aurora"); g_run = 0; break;
+                                default: snprintf(g_nav_label,sizeof(g_nav_label),"KEY 0x%lx", k); break;
+                            }
                         }
                     } else {
                         snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "%s", cbuf);
                         char m[320]; snprintf(m,sizeof(m),"ipc cmd: %s", cbuf); logmsg(m);
-                        if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) request_exit("ipc cmd");
+                        if (!strcasecmp(cbuf,"QUIT") || !strcasecmp(cbuf,"EXIT") || !strcasecmp(cbuf,"STOP")) g_run = 0;
                         else if (!strncasecmp(cbuf,"RAISE",5)) { if (g_ctrl_win && g_ctrl_raise) g_ctrl_raise(g_ctrl_win); }
                         else if (!strncasecmp(cbuf,"OPACITY ",8)) { int v=atoi(cbuf+8); if(v<0)v=0; if(v>255)v=255; if(g_ctrl_win && g_ctrl_set_opacity) g_ctrl_set_opacity(g_ctrl_win,(uint8_t)v); }
                         else if (!strncasecmp(cbuf,"MOVE ",5)) { int x=0,y=0; if(sscanf(cbuf+5,"%d %d",&x,&y)>=1 && g_ctrl_win && g_ctrl_move) g_ctrl_move(g_ctrl_win,x,y); }
@@ -670,6 +641,8 @@ int main(int argc, char **argv) {
     }
 
     logmsg("stopping");
+    /* Restore aurora input so the remote is not left suppressed on exit. */
+    aurora_patch(0);
     if (ttyfd>=0) close(ttyfd);
     if (gpiofd>=0) close(gpiofd);
     if (cmdfd>=0) { close(cmdfd); if (cmd_enabled && cmd_sock_path) unlink(cmd_sock_path); }

@@ -55,13 +55,22 @@ Forward each dispatched (mapped) key from aurora to `otv_port`’s control socke
 - **Hook point:** `FUN_00761cf8` (key dispatch/route) at `0x761cf8`. Patched with a **`b.w` (no-link) 4-byte branch** to a code cave, preserving the original `stmdb sp!,{r4-r8,lr}` at `0x761cfc` (the earlier `bl` + 8-byte patch corrupted `lr`/register-save and crashed aurora → watchdog reboot).
 - **Code cave:** `0x690100` (clean padding between `.gnu.version_r` and `.text`; the first attempt at `0x69003c` overlapped `.gnu.version_r` and corrupted the dynamic-linker version table).
 - **Forwarder** (`src/mempatch.c` `cave_blob`): raw-syscall only (`svc` for `socket`/`sendto`/`close`, `__NR` 281/290/6) — no libc/PLT lazy-binding; writes only to the stack (message buffer) and read-only cave (sockaddr `/tmp/otv_port.sock`); preserves `r0` (key), `r1` (=0x4000 for the skipped `mov.w r1,#16384`), `r4-r7`, and original `lr`; then `b.w 0x761cfc` into the intact prologue. Sends 5-byte datagram `'K' + key(LE)`.
-- **Key semantics (observed):** each physical press yields a press code (e.g. volup = `0x221`) and a release code = press + `0x7d0` (2000), e.g. `0x9f1` (matches `ice_KeyEventDispatchThread` `+2000` release offset). `otv_port` labels `KEY <code>` / `REL <code>`.
-- **Tooling:** `src/mempatch.c` (static ARM binary) — `mempatch <pid> tap|suppress|apply|restore` via `PTRACE_ATTACH`/`POKEDATA`; backs up original bytes to `/tmp/irpatch.orig`. Live/in-memory only (re-apply after aurora restart/reboot).
+- **Key semantics (observed):** each physical press yields a press code (e.g. voldown = `0x221`/545) and a release code = press + `0x7d0` (2000), e.g. `0x9f1` (matches `ice_KeyEventDispatchThread` `+2000` release offset). `otv_port` labels `KEY <code>` / `REL <code>`. Key ids match `ice_keymapping_db.xml` (e.g. `KeyVolumeDown=545`, `KeyExit=528`, `KeyPower=543`).
+- **Tooling:** `src/mempatch.c` (static ARM binary) — `mempatch <pid> tap|suppress|apply|restore` via `PTRACE_ATTACH`/`POKEDATA`; backs up original bytes to `/tmp/irpatch.orig` (preserved across re-applies so restore always returns to stock). Live/in-memory only (re-apply after aurora restart/reboot).
   - `tap`/`apply`: forward keys and let aurora still handle them.
-  - `suppress`: forward keys; pass through only `KeyPower`/suspend (543/0x21F) and `KeySleep` (574) to aurora, early-return for all other keys so aurora ignores them (input takeover). Use with `otv_port --fullscreen`; `KeyExit` (528) in `otv_port` restores the patch and quits back to stock aurora.
-- **Caveats:** patch is volatile (memory only); target addresses are exact for this firmware build (`aurora.elf` sha256 `c7f1c7b5…6084b`); must match the running image. No NAND/flash changes.
+  - `suppress` (input takeover, **validated on-device**): forward every key to otv_port, then re-enter the aurora prologue with the key **rewritten to `0x2F1` (invalid)** so aurora ignores it — except an allowlist that passes through untouched: `KeyPower=543`, `KeyVolumeUp=544`, `KeyVolumeDown=545`, `KeyAux/source=552`, `KeySleep=574`. `otv_port` applies `suppress` on start and `restore`s on exit, so `KeyExit` (528) closes the GUI and hands the remote back to stock aurora.
+
+## Cave assembly pitfalls (each one cost a debugging cycle on-device)
+
+The cave is assembled with `arm-linux-gnueabihf-as` as a standalone `.o` (relocations resolved at assembly time), then copied to `0x690100`. Three subtle bugs hit us:
+
+1. **`ldr r4, =symbol` resolves to a relative offset, not an absolute address.** The literal must be the *absolute* cave address (e.g. `.word 0x690198` for the sockaddr), otherwise `sendto()` gets an invalid pointer, fails silently, and every key is dropped → remote frozen.
+2. **`b.w 0x761cfc` is PC-relative and the assembler encodes it for the cave at address 0.** At runtime (cave at `0x690100`) the branch lands inside the cave → garbage execution → key dispatch hangs after the first key.
+3. **`ldr pc, =0x761cfc` loads an *even* address into PC → ARM-state switch on a Thumb-only code path → crash → watchdog reboot.** The literal must have the Thumb bit set: `0x761cfd`.
+
+The working cave uses absolute literals for the sockaddr and the re-entry (`0x690198` / `0x761cfd`), verified in aurora memory on-device.
 
 ## Validation / safety notes
-- Sidecar must not kill aurora (liveness/watchdog/appmgr coupling). Forwarding is observational/cooperative.
-- Binary patching of `aurora.elf` on-device requires backups and a recovery path; prefer reversible experiments.
+- Sidecar must not kill aurora (liveness/watchdog/appmgr coupling). Forwarding is observational/cooperative; suppression rewrites the key aurora sees rather than skipping the function body.
+- Binary patching of `aurora.elf` on-device requires backups and a recovery path; prefer reversible experiments. `mempatch restore` or an aurora restart reverts everything.
 - Evidence is from static RE (Ghidra exports) and on-device observations; confirm offsets/symbols against the exact running firmware image before patching.
