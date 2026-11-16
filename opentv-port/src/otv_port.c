@@ -1,13 +1,15 @@
 /*
- * OpenTV MB230 sidecar port (v0.1.2)
+ * OpenTV MB230 sidecar port (v0.1.5)
  *
  * CyanogenMod-style sidecar: run OpenTV userspace on stock vendor
  * kernel/drivers/libs. Display backends:
- *  - dfb (default when available): joins running DirectFB/fusion+sawman
- *    session, draws UI on primary display layer surface via libdirectfb.
- *    Proven to render visible (overlay-capable) alongside aurora on MB230.
- *  - fbdev (--fbdev): raw /dev/fbN mmap drawing (may be invisible when
- *    compositor/scanout is DirectFB-controlled).
+ *  - dfb window (preferred): sawman window on layer 0 with evidence-backed
+ *    DFBWindowDescription layout, UPPER stacking; on-device confirmed
+ *    visible and persistent across remote IR input and channel changes.
+ *  - dfb layer-surface (fallback): draws to primary layer 0 surface
+ *    (visible but contends with aurora repaints on input).
+ *  - fbdev (--fbdev): raw /dev/fbN mmap drawing (may be invisible under
+ *    compositor/scanout control).
  *
  * Input: probes /dev/ttyS2 UART IR and /dev/ntgpio (non-blocking).
  * WDT: optional --kick-wdt for Linux /dev/watchdog* (best-effort; platform
@@ -44,6 +46,11 @@ typedef const char* (*DFBErrorStringFn)(DFBResult result);
 typedef DFBResult (*GetLayerFn)(void*, unsigned int, void**);
 typedef DFBResult (*LayerSetCoopFn)(void*, int);
 typedef DFBResult (*LayerGetSurfaceFn)(void*, void**);
+typedef DFBResult (*CreateWindowFn)(void*, void*, void**);
+typedef DFBResult (*WinGetSurfaceFn)(void*, void**);
+typedef DFBResult (*WinSetOpacityFn)(void*, uint8_t);
+typedef DFBResult (*WinRaiseFn)(void*);
+typedef DFBResult (*WinReleaseFn)(void*);
 typedef DFBResult (*SurfGetSizeFn)(void*, int*, int*);
 typedef DFBResult (*SurfSetColorFn)(void*, unsigned char, unsigned char, unsigned char, unsigned char);
 typedef DFBResult (*SurfFillRectFn)(void*, int, int, int, int);
@@ -53,17 +60,22 @@ typedef DFBResult (*SurfReleaseFn)(void*);
 
 typedef struct {
     int ok;
+    int backend; /* 1=window, 2=layer-surface */
     void *lib;
     void *dfb;
     void *layer;
+    void *win;
     void *surf;
     int w, h;
+    int ox, oy;
     DFBErrorStringFn err;
     SurfGetSizeFn getSize;
     SurfSetColorFn setColor;
     SurfFillRectFn fillRect;
     SurfClearFn clear;
-    SurfFlipFn flip; /* layer surface flip */
+    SurfFlipFn flip;
+    SurfReleaseFn surfRelease;
+    WinReleaseFn winRelease;
 } DFB;
 
 typedef struct {
@@ -104,11 +116,85 @@ static void logmsg(const char *msg) {
 
 static const char *dfb_err(DFB *d, DFBResult r) { return (d && d->err) ? d->err(r) : "?"; }
 
+static int dfb_bind_surface_ops(DFB *d, void *surf) {
+    if (!surf) return -1;
+    unsigned long *sv = (unsigned long*)surf;
+    d->surf = surf;
+    d->getSize = (SurfGetSizeFn)sv[7];
+    d->flip    = (SurfFlipFn)sv[20];
+    d->clear   = (SurfClearFn)sv[23];
+    d->setColor= (SurfSetColorFn)sv[26];
+    d->fillRect= (SurfFillRectFn)sv[42];
+    d->surfRelease = (SurfReleaseFn)sv[4];
+    d->w = 1920; d->h = 1080;
+    if (d->getSize) d->getSize(d->surf, &d->w, &d->h);
+    return 0;
+}
+
+static int dfb_try_window(DFB *d, unsigned int layer_id) {
+    /* Correct DFBWindowDescription layout for this vendor lib build
+     * (IDirectFBDisplayLayer_CreateWindow @0x4b358244, libdirectfb-1.7.so.1):
+     * flags=d[0], caps=d[1], w=d[2], h=d[3], pf=d[4], x=d[5], y=d[6], scaps=d[7], stacking=d[10]
+     * flag bits: 0 CAPS,1 WIDTH,2 HEIGHT,3 PIXELFORMAT,4 POSX,5 POSY,6 SURFACE_CAPS,9 STACKING.
+     * On-device: stacking=UPPER(2), caps 0x1/0x11/0x2 visible+persistent on layer 0. */
+    (void)layer_id;
+    if (!d->layer) return -1;
+    unsigned long *lv = (unsigned long*)d->layer;
+    CreateWindowFn createWindow = (CreateWindowFn)lv[33];
+    if (!createWindow) { logmsg("dfb: layer CreateWindow unavailable"); return -1; }
+
+    const unsigned int stackings[] = {2u, 1u};
+    const unsigned int capsvals[]  = {0x1u, 0x11u, 0x2u};
+    for (int si = 0; si < 2; si++) {
+        for (int ci = 0; ci < 3; ci++) {
+            uint32_t desc[64]; memset(desc, 0, sizeof(desc));
+            unsigned int flags = (1u<<0)|(1u<<1)|(1u<<2)|(1u<<3)|(1u<<4)|(1u<<5)|(1u<<6)|(1u<<9);
+            desc[0] = flags;
+            desc[1] = capsvals[ci];
+            desc[2] = 800;      /* width */
+            desc[3] = 500;      /* height */
+            desc[4] = 0;        /* pixelformat */
+            desc[5] = 40;       /* posx */
+            desc[6] = 40;       /* posy */
+            desc[7] = 0;        /* surface_caps */
+            desc[10]= stackings[si];
+            void *win = NULL;
+            DFBResult r = createWindow(d->layer, desc, &win);
+            if (r || !win) {
+                char m[192]; snprintf(m,sizeof(m),"dfb: CreateWindow try caps=0x%x stacking=%u failed %d %s", desc[1], desc[10], r, dfb_err(d,r));
+                logmsg(m);
+                continue;
+            }
+            unsigned long *wv = (unsigned long*)win;
+            WinGetSurfaceFn getSurf = (WinGetSurfaceFn)wv[10];
+            WinSetOpacityFn setOpacity = (WinSetOpacityFn)wv[22];
+            WinRaiseFn raiseToTop = (WinRaiseFn)wv[33];
+            d->winRelease = (WinReleaseFn)wv[4];
+            void *surf = NULL;
+            r = getSurf ? getSurf(win, &surf) : -1;
+            if (r || !surf) {
+                char m[160]; snprintf(m,sizeof(m),"dfb: window GetSurface failed %d %s", r, dfb_err(d,r)); logmsg(m);
+                if (d->winRelease) d->winRelease(win);
+                d->winRelease = NULL;
+                continue;
+            }
+            if (setOpacity) setOpacity(win, 255);
+            if (raiseToTop) raiseToTop(win);
+            dfb_bind_surface_ops(d, surf);
+            d->win = win;
+            d->backend = 1;
+            d->ox = 0; d->oy = 0;
+            char m[192]; snprintf(m,sizeof(m),"dfb: ok window %dx%d @%d,%d stacking=%u caps=0x%x (layer 0)", (int)desc[2],(int)desc[3],(int)desc[5],(int)desc[6],(unsigned)desc[10],(unsigned)desc[1]); logmsg(m);
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int dfb_init(DFB *d) {
     memset(d, 0, sizeof(*d));
     /* Join running mp session; no-sighandler avoids DirectFB's fatal signal
-     * trapping on Ctrl-C/SIGTERM which can destabilize shared fusion session
-     * and has been observed to correlate with TV reboot on exit. */
+     * trapping on Ctrl-C/SIGTERM which can destabilize shared fusion session. */
     setenv("DFBARGS", "system=fbdev,wm=sawman,no-cursor,no-sighandler,module-dir=/vendor/lib/dfb/directfb-1.7-1", 0);
     const char *paths[] = {"/vendor/lib/dfb/libdirectfb-1.7.so.1", "/mtd_apexe/board/lib/dfb/libdirectfb-1.7.so.1", "libdirectfb-1.7.so.1", NULL};
     for (int i = 0; paths[i]; i++) {
@@ -128,36 +214,40 @@ static int dfb_init(DFB *d) {
     GetLayerFn getLayer = (GetLayerFn)(((unsigned long*)d->dfb)[14]);
     r = getLayer ? getLayer(d->dfb, 0, &d->layer) : -1;
     if (r || !d->layer) { char m[128]; snprintf(m,sizeof(m),"dfb: GetDisplayLayer(0) failed %d %s", r, dfb_err(d,r)); logmsg(m); return -1; }
+
+    /* Preferred: sawman window overlay (persistent across IR/channel).
+     * Try before changing layer coop to match proven probe behavior. */
+    if (dfb_try_window(d, 0) == 0) { d->ok = 1; return 0; }
+
+    /* Fallback: primary layer surface (visible but contends with aurora repaints). */
+    logmsg("dfb: window backend failed, trying layer-surface fallback");
     unsigned long *lv = (unsigned long*)d->layer;
     LayerSetCoopFn setCoop = (LayerSetCoopFn)lv[11];
     if (setCoop) setCoop(d->layer, 1 /*SHARED*/);
     LayerGetSurfaceFn getSurf = (LayerGetSurfaceFn)lv[9];
-    r = getSurf ? getSurf(d->layer, &d->surf) : -1;
-    if (r || !d->surf) { char m[128]; snprintf(m,sizeof(m),"dfb: GetSurface failed %d %s", r, dfb_err(d,r)); logmsg(m); return -1; }
-    unsigned long *sv = (unsigned long*)d->surf;
-    /* vtable slots matched to exact symbol starts in libdirectfb-1.7.so.1 (MB230) */
-    d->getSize = (SurfGetSizeFn)sv[7];
-    d->flip    = (SurfFlipFn)sv[20];
-    d->clear   = (SurfClearFn)sv[23];
-    d->setColor= (SurfSetColorFn)sv[26];
-    d->fillRect= (SurfFillRectFn)sv[42];
-    d->w = 1920; d->h = 1080;
-    if (d->getSize) d->getSize(d->surf, &d->w, &d->h);
+    void *lsurf = NULL;
+    r = getSurf ? getSurf(d->layer, &lsurf) : -1;
+    if (r || !lsurf) { char m[128]; snprintf(m,sizeof(m),"dfb: GetSurface failed %d %s", r, dfb_err(d,r)); logmsg(m); return -1; }
+    dfb_bind_surface_ops(d, lsurf);
+    d->backend = 2;
+    d->ox = 0; d->oy = 0;
     d->ok = 1;
     char m[128]; snprintf(m,sizeof(m),"dfb: ok layer-surface %dx%d (primary layer 0)", d->w, d->h); logmsg(m);
     return 0;
 }
 
 static void dfb_shutdown(DFB *d) {
-    /* Best-effort gentle cleanup: clear our drawing and flip once, then stop.
-     * Avoid aggressive interface release in shared fusion session from here;
-     * process exit detaches. Clearing helps reduce stale overlay if we exit
-     * cleanly (SIGTERM/SIGINT). Abrupt kills may still disrupt shared session. */
+    /* Gentle, ordered cleanup for shared fusion/sawman session:
+     * clear+flip to remove overlay, then release window surface/window. */
     if (d->ok && d->surf && d->clear && d->flip) {
         d->clear(d->surf, 0, 0, 0, 0);
         d->flip(d->surf, NULL, 0);
     }
-    d->ok = 0;
+    if (d->backend == 1) {
+        if (d->surf && d->surfRelease) d->surfRelease(d->surf);
+        if (d->win && d->winRelease) d->winRelease(d->win);
+    }
+    d->surf = NULL; d->win = NULL; d->ok = 0;
 }
 
 static void dfb_fill(DFB *d, int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -285,7 +375,7 @@ int main(int argc, char **argv) {
     /* install our handlers early; dfb init uses no-sighandler to avoid
      * DirectFB hijacking/aborting on SIGINT/SIGTERM in shared session */
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
-    logmsg("starting OpenTV MB230 port v0.1.4 (sidecar)");
+    logmsg("starting OpenTV MB230 port v0.1.5 (sidecar)");
     if (wd.enabled) wdkick_open(&wd);
 
     DFB dfb; memset(&dfb,0,sizeof(dfb));
@@ -328,13 +418,17 @@ int main(int argc, char **argv) {
             int H = use_dfb ? dfb.h : fb.h;
             void (*R)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? NULL : fb_rect_cb;
             void *ctx = use_dfb ? (void*)&dfb : (void*)&fb;
-            /* Semi-transparent panel overlay to reduce full-surface conflict with
-             * aurora repaints (aurora may redraw on input; we repaint this panel
-             * each frame). Full opaque repaint of entire layer is avoided. */
-            int px = 40, py = 40, pw = W - 80, ph = 640;
-            if (ph > H - 80) ph = H - 80;
+            /* Draw UI panel. For window backend, surface is the window (overlay
+             * persists across aurora input/channel repaints). For layer-surface,
+             * repaint a semi-transparent panel each frame on shared primary layer. */
+            int px = (use_dfb && dfb.backend == 1) ? 0 : 40;
+            int py = (use_dfb && dfb.backend == 1) ? 0 : 40;
+            int pw = W - (px ? 80 : 0);
+            int ph = 580;
+            if (ph > H - 20) ph = H - 20;
+            if (pw < 100) pw = W;
             if (use_dfb) {
-                dfb_rect_a(&dfb, 0, 0, W, H, 0, 0, 0, 0); /* clear full frame transparent */
+                dfb_rect_a(&dfb, 0, 0, W, H, 0, 0, 0, 0); /* transparent clear */
                 dfb_rect_a(&dfb, px, py, pw, ph, 10, 14, 24, 210);
                 dfb_rect_a(&dfb, px, py, pw, 4, 70, 120, 200, 230);
                 dfb_rect_a(&dfb, px, py+ph-4, pw, 4, 70, 120, 200, 230);
@@ -348,27 +442,29 @@ int main(int argc, char **argv) {
                 R(ctx, px, py, 4, ph, 70, 120, 200);
                 R(ctx, px+pw-4, py, 4, ph, 70, 120, 200);
             }
+            int tx = px + 40, ty = py + 30;
             void (*Rtext)(void*,int,int,int,int,uint8_t,uint8_t,uint8_t) = use_dfb ? dfb_rect_cb2 : fb_rect_cb;
-            draw_text_common(80, 80, 7, "OPENTV PORT", 245,247,251, Rtext, ctx);
-            draw_text_common(80, 150, 3, "MB230 VESTEL SIDECAR - V0.1.4", 140,190,255, Rtext, ctx);
-            draw_text_common(80, 210, 3, "CYANOGENMOD-STYLE: VENDOR BASE + OPENTV USERSPACE", 180,220,180, Rtext, ctx);
+            draw_text_common(tx, ty, 6, "OPENTV PORT", 245,247,251, Rtext, ctx);
+            draw_text_common(tx, ty+70, 3, "MB230 VESTEL SIDECAR - V0.1.5", 140,190,255, Rtext, ctx);
+            draw_text_common(tx, ty+120, 3, "VENDOR BASE + OPENTV USERSPACE", 180,220,180, Rtext, ctx);
             char line[96];
-            snprintf(line,sizeof(line),"UPTIME: %ld S   FRAMES: %lu   RENDER: %s", (t-start)/1000, ++frames, use_dfb?"DFB":"FBDEV");
-            draw_text_common(80, 300, 3, line, 230,230,150, Rtext, ctx);
+            const char *rname = "FBDEV";
+            if (use_dfb) rname = (dfb.backend==1) ? "DFB-WIN" : "DFB-LAYER";
+            snprintf(line,sizeof(line),"UPTIME: %ld S  FRAMES: %lu  RENDER: %s", (t-start)/1000, ++frames, rname);
+            draw_text_common(tx, ty+190, 3, line, 230,230,150, Rtext, ctx);
             snprintf(line,sizeof(line),"INPUT EVENTS: %lu   LAST: %s", events, last_src);
-            draw_text_common(80, 340, 3, line, 230,230,150, Rtext, ctx);
+            draw_text_common(tx, ty+230, 3, line, 230,230,150, Rtext, ctx);
             if (wd.enabled) snprintf(line,sizeof(line),"WDT KICK: %s  KICKS=%lu ERR=%lu", wd.fd>=0?wd.path:"NONE", wd.kicks, wd.errors);
             else snprintf(line,sizeof(line),"WDT KICK: OFF (PLATFORM/AURORA LIVENESS)");
-            draw_text_common(80, 380, 3, line, 255,200,120, Rtext, ctx);
+            draw_text_common(tx, ty+270, 3, line, 255,200,120, Rtext, ctx);
             if (last_n>0) {
                 char hex[96]="LAST BYTES: "; int off=12;
                 for (int i=0;i<last_n && i<8 && off<(int)sizeof(hex)-4;i++) off+=snprintf(hex+off,sizeof(hex)-off,"%02X ",last_bytes[i]);
-                draw_text_common(80, 440, 3, hex, 180,220,220, Rtext, ctx);
+                draw_text_common(tx, ty+330, 3, hex, 180,220,220, Rtext, ctx);
             }
-            if (t-last_any < 1200) draw_text_common(80, 520, 4, "INPUT RECEIVED", 80,255,140, Rtext, ctx);
-            else draw_text_common(80, 520, 4, "WAITING / SIDECAR READY", 170,170,190, Rtext, ctx);
-            draw_text_common(80, py+ph-50, 2, "SIDECAR: AURORA ALIVE. SEMI-TRANSPARENT OVERLAY PANEL.", 220,180,150, Rtext, ctx);
-            draw_text_common(80, py+ph-25, 2, "SEE DOCS/REBOOT_AND_LIVENESS.MD", 160,160,160, Rtext, ctx);
+            if (t-last_any < 1200) draw_text_common(tx, ty+400, 4, "INPUT RECEIVED", 80,255,140, Rtext, ctx);
+            else draw_text_common(tx, ty+400, 4, "SIDECAR READY", 170,170,190, Rtext, ctx);
+            draw_text_common(tx, py+ph-30, 2, "AURORA ALIVE. WINDOW OVERLAY PERSISTS ACROSS INPUT.", 220,180,150, Rtext, ctx);
             if (use_dfb && dfb.flip) dfb.flip(dfb.surf, NULL, 0);
         }
 
