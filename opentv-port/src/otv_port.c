@@ -44,6 +44,9 @@ static volatile sig_atomic_t g_run = 1;
 static unsigned int g_win_x = 40, g_win_y = 40, g_win_w = 800, g_win_h = 500;
 static unsigned int g_win_caps = 0x1, g_win_stacking = 2;
 static char g_last_ipc_cmd[48] = "-";
+static unsigned long g_presses = 0, g_releases = 0, g_long_presses = 0, g_repeats = 0;
+static long g_last_press_ms = 0;
+static unsigned long g_last_press_key = 0, g_held_key = 0;
 
 typedef int DFBResult;
 typedef DFBResult (*WinSetOpacityFn2)(void*, uint8_t);
@@ -514,8 +517,10 @@ int main(int argc, char **argv) {
             if (use_dfb) rname = (dfb.backend==1) ? "DFB-WIN" : "DFB-LAYER";
             snprintf(line,sizeof(line),"UPTIME: %ld S  FRAMES: %lu  RENDER: %s  DRAW:%dMS", (t-start)/1000, ++frames, rname, redraw_ms);
             draw_text_common(tx, ty+190, 3, line, 230,230,150, Rtext, ctx);
-            snprintf(line,sizeof(line),"INPUT EVENTS: %lu   LAST: %s", events, last_src);
+            snprintf(line,sizeof(line),"PRESS: %lu  REP: %lu  REL: %lu  LONG: %lu", g_presses, g_repeats, g_releases, g_long_presses);
             draw_text_common(tx, ty+230, 3, line, 230,230,150, Rtext, ctx);
+            snprintf(line,sizeof(line),"RAW EVENTS: %lu   LAST: %s", events, last_src);
+            draw_text_common(tx, ty+258, 3, line, 180,180,180, Rtext, ctx);
             if (wd.enabled) snprintf(line,sizeof(line),"WDT KICK: %s  KICKS=%lu ERR=%lu", wd.fd>=0?wd.path:"NONE", wd.kicks, wd.errors);
             else snprintf(line,sizeof(line),"WDT KICK: OFF (PLATFORM/AURORA LIVENESS)");
             draw_text_common(tx, ty+270, 3, line, 255,200,120, Rtext, ctx);
@@ -556,10 +561,30 @@ int main(int argc, char **argv) {
                     last_n = n<16?(int)n:16; memcpy(last_bytes,cbuf,last_n);
                     if (n == 5 && (unsigned char)cbuf[0] == 0x4b) { /* binary key: 'K' + 4-byte LE key */
                         unsigned long k = (unsigned char)cbuf[1] | ((unsigned long)(unsigned char)cbuf[2] << 8) | ((unsigned long)(unsigned char)cbuf[3] << 16) | ((unsigned long)(unsigned char)cbuf[4] << 24);
+                        long tms = now_ms();
                         if (k >= 2000) { /* release event = press code + 2000 (0x7d0) */
-                            snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "REL 0x%lx", k - 2000);
-                            char mk[128]; snprintf(mk, sizeof(mk), "ipc key release 0x%lx", k - 2000); logmsg(mk);
-                        } else {
+                            unsigned long pk = k - 2000;
+                            g_releases++;
+                            snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "REL 0x%lx", pk);
+                            long held = (g_last_press_ms && pk == g_held_key) ? (tms - g_last_press_ms) : -1;
+                            char mk[160];
+                            if (held >= 500) {
+                                g_long_presses++;
+                                snprintf(mk, sizeof(mk), "ipc key release 0x%lx (LONG %ldms)", pk, held);
+                            } else {
+                                snprintf(mk, sizeof(mk), "ipc key release 0x%lx", pk);
+                            }
+                            logmsg(mk);
+                            g_held_key = 0;
+                        } else if (k == g_held_key) { /* auto-repeat while held: same key, no release yet */
+                            g_repeats++;
+                            g_last_press_ms = tms;
+                            snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "REP 0x%lx", k);
+                        } else { /* new press */
+                            g_presses++;
+                            g_held_key = k;
+                            g_last_press_ms = tms;
+                            g_last_press_key = k;
                             snprintf(g_last_ipc_cmd, sizeof(g_last_ipc_cmd), "KEY 0x%lx", k);
                             char mk[128]; snprintf(mk, sizeof(mk), "ipc key press 0x%lx", k); logmsg(mk);
                         }
